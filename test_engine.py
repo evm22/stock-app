@@ -16,7 +16,7 @@ connection and an English (non-Hebrew) folder path for it to work locally.
 
 import sys
 
-from engine import get_stock_quote
+from engine import get_stock_quote, get_price_history, RANGES
 
 # Well-known tickers we expect to resolve to a real company + positive price.
 VALID_TICKERS = ["AAPL", "MSFT", "TEVA"]
@@ -64,6 +64,34 @@ def expect_not_found(symbol):
         f"expected found=False for {symbol}, but got {quote.name!r} @ {quote.price}"
 
 
+# Expected columns for any history table.
+HISTORY_COLUMNS = ["Date", "Open", "High", "Low", "Close", "Volume"]
+
+
+def expect_history(symbol, range_key):
+    """A real ticker + range should return a non-empty, well-formed table."""
+    history = get_price_history(symbol, range_key)
+
+    assert history.found, \
+        f"expected history for {symbol} {range_key}, reason: {history.reason!r}"
+    assert history.data is not None and not history.data.empty, \
+        f"expected non-empty data for {symbol} {range_key}"
+    for column in HISTORY_COLUMNS:
+        assert column in history.data.columns, \
+            f"missing column {column!r} for {symbol} {range_key}"
+
+    rows = len(history.data)
+    print(f"      {symbol} {range_key}: {rows} rows "
+          f"(period={history.period}, interval={history.interval})")
+
+
+def expect_history_not_found(symbol, range_key):
+    """A fake ticker (or bad range) should report no data, not crash."""
+    history = get_price_history(symbol, range_key)
+    assert not history.found, \
+        f"expected no history for {symbol} {range_key}, but got data"
+
+
 def main():
     print("Running engine tests against live Yahoo Finance data...\n")
 
@@ -73,6 +101,20 @@ def main():
                              lambda s=symbol: expect_valid(s)))
     results.append(check(f"{INVALID_TICKER} is reported as not found",
                          lambda: expect_not_found(INVALID_TICKER)))
+
+    # Price history: test the reliable daily/weekly ranges. We skip 1D/1W here
+    # because intraday data is often empty on the free tier (the engine handles
+    # that gracefully, but it would make this test flaky).
+    for range_key in ["1M", "6M", "1Y", "5Y"]:
+        results.append(check(f"AAPL {range_key} history returns data",
+                             lambda r=range_key: expect_history("AAPL", r)))
+
+    # A fake ticker should report "no data", not crash.
+    results.append(check(f"{INVALID_TICKER} 1M history is reported as no-data",
+                         lambda: expect_history_not_found(INVALID_TICKER, "1M")))
+    # An unknown range key should also be handled gracefully.
+    results.append(check("an unknown range key is reported as no-data",
+                         lambda: expect_history_not_found("AAPL", "99X")))
 
     passed = sum(results)
     total = len(results)

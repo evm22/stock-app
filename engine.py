@@ -14,6 +14,7 @@ import math
 from dataclasses import dataclass, field
 from typing import Optional
 
+import pandas as pd  # tables of price data (yfinance returns these too)
 import yfinance as yf  # free Yahoo Finance data — our source for stock prices
 
 
@@ -184,3 +185,93 @@ def get_stock_quote(ticker: str) -> StockQuote:
         prev_source=prev_source,
         sources=sources,
     )
+
+
+# --- Price history (for the chart) ---------------------------------------
+
+@dataclass
+class PriceHistory:
+    """
+    A clean, structured result for a price-history (chart) lookup.
+
+    `found` is the "did we get usable data?" signal:
+      - found == True  -> `data` is a DataFrame with columns
+                          Date, Open, High, Low, Close, Volume.
+      - found == False -> no data for this range (show a gentle note);
+                          `reason` explains why.
+    """
+    found: bool
+    symbol: str
+    range_key: str
+    period: str = ""
+    interval: str = ""
+    data: Optional[pd.DataFrame] = None
+    reason: str = ""
+
+
+# Each user-facing range maps to a (yfinance period, interval) pair.
+# Short ranges use intraday intervals; long ranges use daily/weekly so the
+# chart stays readable and the download stays small (free tier).
+RANGES = {
+    "1D": ("1d",  "5m"),    # one day, every 5 minutes
+    "1W": ("5d",  "30m"),   # ~one week, every 30 minutes
+    "1M": ("1mo", "1d"),    # one month, daily
+    "6M": ("6mo", "1d"),    # six months, daily
+    "1Y": ("1y",  "1d"),    # one year, daily
+    "5Y": ("5y",  "1wk"),   # five years, weekly
+}
+
+
+def get_price_history(ticker: str, range_key: str) -> PriceHistory:
+    """
+    Fetch price history for `ticker` over the time window named by `range_key`
+    (one of the keys in RANGES, e.g. "1M").
+
+    Always returns a PriceHistory. If the range is empty or anything goes wrong
+    (intraday data is often missing on the free tier), returns found=False with
+    a human-readable `reason` instead of raising.
+    """
+    symbol = (ticker or "").strip()
+    display_symbol = symbol.upper()
+
+    # Guard against a blank ticker or an unknown range key.
+    if not symbol:
+        return PriceHistory(False, display_symbol, range_key,
+                            reason="No ticker given.")
+    if range_key not in RANGES:
+        return PriceHistory(False, display_symbol, range_key,
+                            reason=f"Unknown range '{range_key}'.")
+
+    period, interval = RANGES[range_key]
+
+    # Download the candles. Any network/library error becomes a clean "no data".
+    try:
+        raw = yf.Ticker(symbol).history(period=period, interval=interval)
+    except Exception as error:
+        return PriceHistory(False, display_symbol, range_key, period, interval,
+                            reason=f"Error fetching data: {error}")
+
+    # Empty frame = nothing for this range (common for 1D intraday on free tier).
+    if raw is None or raw.empty:
+        return PriceHistory(
+            False, display_symbol, range_key, period, interval,
+            reason="No data for this range (the free data source sometimes has "
+                   "gaps, especially for intraday ranges like 1D/1W).")
+
+    # Tidy up the table for charting:
+    #   - move the date/time index into a normal column,
+    #   - the column is "Date" for daily data and "Datetime" for intraday,
+    #     so rename either one to "Date",
+    #   - keep just the columns we care about and drop rows with no close price.
+    df = raw.reset_index()
+    date_col = "Datetime" if "Datetime" in df.columns else "Date"
+    df = df.rename(columns={date_col: "Date"})
+
+    wanted = ["Date", "Open", "High", "Low", "Close", "Volume"]
+    df = df[[c for c in wanted if c in df.columns]].dropna(subset=["Close"])
+
+    if df.empty:
+        return PriceHistory(False, display_symbol, range_key, period, interval,
+                            reason="No valid price rows for this range.")
+
+    return PriceHistory(True, display_symbol, range_key, period, interval, data=df)

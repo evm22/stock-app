@@ -10,6 +10,7 @@ Run locally with:
     streamlit run app.py
 """
 
+import altair as alt  # charting library that ships with Streamlit
 import streamlit as st
 
 import engine  # our pure-Python data engine (no Streamlit inside it)
@@ -28,6 +29,42 @@ st.set_page_config(page_title="Stock Analysis App", page_icon="📈")
 def load_quote(symbol):
     """Thin cached wrapper around the engine so reruns don't re-hit Yahoo."""
     return engine.get_stock_quote(symbol)
+
+
+@st.cache_data(ttl=600)
+def load_history(symbol, range_key):
+    """Cached wrapper for price history, so flipping ranges back and forth is fast."""
+    return engine.get_price_history(symbol, range_key)
+
+
+def make_candlestick(df):
+    """
+    Build a simple candlestick chart from a price-history table using Altair.
+
+    Each candle has a thin "wick" (the day's low-to-high range) and a thick
+    "body" (open-to-close). Green means the price closed up, red means down.
+    """
+    # Green when close >= open (up day), red otherwise (down day).
+    up_down_color = alt.condition(
+        "datum.Open <= datum.Close",
+        alt.value("#26a69a"),  # green
+        alt.value("#ef5350"),  # red
+    )
+    base = alt.Chart(df).encode(
+        x=alt.X("Date:T", title=None),
+        color=up_down_color,
+    )
+    # The wick: a vertical line from Low to High.
+    wicks = base.mark_rule().encode(
+        y=alt.Y("Low:Q", title="Price", scale=alt.Scale(zero=False)),
+        y2="High:Q",
+    )
+    # The body: a bar from Open to Close.
+    bodies = base.mark_bar().encode(
+        y="Open:Q",
+        y2="Close:Q",
+    )
+    return wicks + bodies
 
 
 # --- Page content ---------------------------------------------------------
@@ -81,6 +118,42 @@ if symbol:
         # One-line note of which exchange this is and the exact symbol used.
         exchange = quote.exchange or "unknown exchange"
         st.caption(f"{quote.symbol} · {exchange}")
+
+        # --- Price history chart ----------------------------------------
+        st.divider()
+        st.markdown("### Price history")
+
+        # Range selector as a row of buttons (segmented control). The keys come
+        # straight from the engine so the two never drift apart. Default = 1M.
+        range_key = st.segmented_control(
+            "Range",
+            options=list(engine.RANGES.keys()),
+            default="1M",
+            label_visibility="collapsed",
+        )
+        # If the user clicks the active button it deselects (returns None);
+        # fall back to the default so a chart is always shown.
+        range_key = range_key or "1M"
+
+        # Toggle between a clean line of closing prices and full candlesticks.
+        chart_type = st.radio(
+            "Chart type",
+            options=["Line", "Candlestick"],
+            horizontal=True,
+        )
+
+        # Fetch the candles for the chosen range (cached).
+        history = load_history(symbol, range_key)
+
+        if not history.found:
+            # Empty range (common for 1D/1W intraday on the free tier).
+            st.info(f"No chart data for {range_key}: {history.reason}")
+        elif chart_type == "Line":
+            # Built-in line chart: closing price over time (Date as the x-axis).
+            st.line_chart(history.data.set_index("Date")["Close"])
+        else:
+            # Candlestick via Altair (open/high/low/close).
+            st.altair_chart(make_candlestick(history.data), width="stretch")
 
         # Collapsed by default. Open it to see WHICH source gave us the price
         # and every raw value we tried — handy for diagnosing odd tickers.
