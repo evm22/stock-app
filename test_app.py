@@ -1,0 +1,153 @@
+"""
+test_app.py - checks for the display helpers in app.py that DON'T need network.
+
+The data engine is covered by test_engine.py (which hits live Yahoo). This file
+covers the chart-building side, focusing on make_candlestick(): we feed it a
+small synthetic OHLC table (no Yahoo call) and inspect the resulting Vega-Lite
+spec, so these tests are fast and deterministic.
+
+Run it from the project folder with the venv's python:
+
+    python test_app.py
+
+Prints a clear ASCII PASS/FAIL per check and exits 0 if all passed, 1 otherwise.
+"""
+
+import os
+import sys
+
+# app.py reaches for the browser's localStorage on import; this seam keeps the
+# (browser-blocking) component out of the way when there's no real Streamlit
+# server, exactly like AppTest does. Set it BEFORE importing app.
+os.environ.setdefault("STOCKAPP_DISABLE_BROWSER_STORAGE", "1")
+
+import pandas as pd
+
+import engine
+import app
+
+
+def check(description, test_function):
+    """Run one test; print PASS/FAIL. Returns True/False for the tally."""
+    try:
+        test_function()
+        print(f"PASS: {description}")
+        return True
+    except AssertionError as error:
+        print(f"FAIL: {description} -> {error}")
+        return False
+    except Exception as error:
+        print(f"FAIL: {description} -> unexpected error: {error}")
+        return False
+
+
+def _sample_history():
+    """A tiny, hand-made OHLC table (no network) for charting tests.
+
+    First close is 100.0 on purpose, so percentages are easy to reason about.
+    """
+    return pd.DataFrame({
+        "Date": pd.to_datetime(["2026-01-02", "2026-01-03", "2026-01-06",
+                                "2026-01-07", "2026-01-08"]),
+        "Open":   [100.0, 102.0,  99.0, 105.0, 108.0],
+        "High":   [103.0, 104.0, 106.0, 110.0, 112.0],
+        "Low":    [ 98.0,  97.0,  96.0, 104.0, 107.0],
+        "Close":  [100.0, 101.0, 103.0, 108.0, 110.0],
+        "Volume": [1_000, 1_200,   900, 1_500, 1_300],
+    })
+
+
+def _layer_values(spec, layer):
+    """A layer's inline data rows, whether inlined or via top-level datasets."""
+    data = layer.get("data", {})
+    if "values" in data:
+        return data["values"]
+    name = data.get("name")
+    if name and "datasets" in spec:
+        return spec["datasets"].get(name, [])
+    return []
+
+
+def expect_plain_candles_unchanged():
+    """Without pct_first_close: just candles (wick + body) on one Price axis,
+    and no secondary-scale resolution (the non-% path must stay simple)."""
+    spec = app.make_candlestick(_sample_history()).to_dict()
+    layers = spec.get("layer", [])
+    assert len(layers) == 2, f"expected 2 candle layers, got {len(layers)}"
+    assert "resolve" not in spec, "plain candles should not resolve scales"
+    wick_y = layers[0]["encoding"]["y"]
+    assert wick_y.get("title") == "Price", \
+        f"left axis should be 'Price', got {wick_y.get('title')!r}"
+    print("      plain candlestick: wick+body on a single Price axis")
+
+
+def expect_percent_mode_adds_baseline_and_axis():
+    """With pct_first_close: candles + a dashed 0% baseline on the LEFT price
+    scale + a linked right-hand '% change' axis; y scales resolved independent."""
+    df = _sample_history()
+    base = engine.first_close(df)
+    assert base == 100.0, f"sanity: first close should be 100.0, got {base}"
+    spec = app.make_candlestick(df, pct_first_close=base).to_dict()
+
+    layers = spec.get("layer", [])
+    assert len(layers) == 3, \
+        f"expected 3 layers (candles, baseline, % axis), got {len(layers)}"
+    assert spec.get("resolve", {}).get("scale", {}).get("y") == "independent", \
+        "y scales should be independent so the two axes keep their own domains"
+
+    # Candles keep the left $ axis, with the domain padded around Low..High.
+    left_y = layers[0]["layer"][0]["encoding"]["y"]
+    assert left_y.get("title") == "Price", "candles must stay on the Price axis"
+    left_domain = left_y["scale"]["domain"]
+    assert left_domain[0] < df["Low"].min() and left_domain[1] > df["High"].max(), \
+        f"price domain should pad Low..High, got {left_domain}"
+
+    # Baseline: a dashed rule at y == base (the start close), on the LEFT scale.
+    baseline = layers[1]
+    assert baseline["mark"]["type"] == "rule", "baseline must be a rule"
+    assert baseline["mark"].get("strokeDash"), "baseline rule should be dashed"
+    assert baseline["encoding"]["y"]["scale"]["domain"] == left_domain, \
+        "baseline must share the candles' left price scale (so it lines up)"
+    ys = [row.get("y") for row in _layer_values(spec, baseline)]
+    assert any(abs(y - base) < 1e-9 for y in ys if y is not None), \
+        f"baseline should sit at the start close {base}, got {ys}"
+
+    # Right axis: '% change', oriented right, domain straddling 0%.
+    right_y = layers[2]["encoding"]["y"]
+    assert right_y["axis"]["orient"] == "right", "% axis must be on the right"
+    assert right_y["title"] == "% change", \
+        f"right axis title wrong: {right_y['title']!r}"
+    dom = right_y["scale"]["domain"]
+    assert dom[0] < 0 < dom[1], f"% domain should straddle 0, got {dom}"
+    # The % axis must be the exact linear image of the left price domain, so the
+    # two scales stay aligned pixel-for-pixel and the start close reads 0%.
+    assert abs(dom[0] - engine.price_to_pct_change(left_domain[0], base)) < 1e-9
+    assert abs(dom[1] - engine.price_to_pct_change(left_domain[1], base)) < 1e-9
+    print(f"      percent candlestick: 3 layers; dashed 0% baseline at "
+          f"{base:.2f}; right axis [{dom[0]:.1f}%, {dom[1]:.1f}%]")
+
+
+def main():
+    print("Running app display tests (no network)...\n")
+    results = [
+        check("plain candlestick is wick+body on one Price axis",
+              expect_plain_candles_unchanged),
+        check("percent candlestick adds 0% baseline + linked % axis",
+              expect_percent_mode_adds_baseline_and_axis),
+    ]
+
+    passed = sum(results)
+    total = len(results)
+    print(f"\n{passed}/{total} tests passed.")
+
+    # Plain ASCII on purpose (Windows cp1252/cp1255 consoles choke on emoji).
+    if passed == total:
+        print("ALL TESTS PASSED")
+        sys.exit(0)
+    else:
+        print("SOME TESTS FAILED")
+        sys.exit(1)
+
+
+if __name__ == "__main__":
+    main()
