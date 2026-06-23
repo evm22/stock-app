@@ -21,6 +21,8 @@ from engine import (
     get_price_history,
     get_company_metrics,
     get_stock_technicals,
+    compute_verdict,
+    VERDICT_LABELS,
     RANGES,
 )
 
@@ -149,6 +151,41 @@ def expect_metrics_not_found(symbol):
     assert not technicals.found, f"expected technicals not-found for {symbol}"
 
 
+def expect_verdict(symbol):
+    """A real ticker should produce a valid label, in-range score, and a
+    breakdown whose total points are consistent with the score."""
+    verdict = compute_verdict(symbol)
+
+    assert verdict.found, f"expected a verdict result for {symbol}"
+    assert verdict.enough_data, \
+        f"expected enough data for {symbol}: {verdict.reason}"
+    assert verdict.label in VERDICT_LABELS, \
+        f"label {verdict.label!r} not in {VERDICT_LABELS}"
+    assert 0 <= verdict.score <= 100, f"score out of range: {verdict.score}"
+    assert verdict.breakdown, f"expected a non-empty breakdown for {symbol}"
+
+    # The score must agree in direction with the sum of the points:
+    # positive total -> above 50, negative -> below 50, zero -> exactly 50.
+    raw = sum(s.points for s in verdict.breakdown)
+    if raw > 0:
+        assert verdict.score > 50, f"raw {raw} > 0 but score {verdict.score} <= 50"
+    elif raw < 0:
+        assert verdict.score < 50, f"raw {raw} < 0 but score {verdict.score} >= 50"
+    else:
+        assert abs(verdict.score - 50) < 1e-9, \
+            f"raw 0 but score {verdict.score} != 50"
+
+    print(f"      {symbol}: {verdict.label} (score {verdict.score:.0f}/100, "
+          f"{len(verdict.breakdown)} signals, raw {raw:+d})")
+
+
+def expect_verdict_not_usable(symbol):
+    """A fake ticker must come back not-found OR not-enough-data, never a label."""
+    verdict = compute_verdict(symbol)
+    assert (not verdict.found) or (not verdict.enough_data), \
+        f"expected no usable verdict for {symbol}, got {verdict.label!r}"
+
+
 def main():
     print("Running engine tests against live Yahoo Finance data...\n")
 
@@ -183,6 +220,13 @@ def main():
     # A fake ticker must return not-found for the metric groups too.
     results.append(check(f"{INVALID_TICKER} metrics are reported as not found",
                          lambda: expect_metrics_not_found(INVALID_TICKER)))
+
+    # Step 4: deterministic verdict for real tickers + graceful invalid.
+    for symbol in ["AAPL", "MSFT", "TEVA"]:
+        results.append(check(f"{symbol} verdict is valid and consistent",
+                             lambda s=symbol: expect_verdict(s)))
+    results.append(check(f"{INVALID_TICKER} yields no usable verdict",
+                         lambda: expect_verdict_not_usable(INVALID_TICKER)))
 
     passed = sum(results)
     total = len(results)

@@ -49,6 +49,22 @@ def load_technicals(symbol):
     return engine.get_stock_technicals(symbol)
 
 
+@st.cache_data(ttl=600)
+def load_verdict(symbol):
+    """Cached wrapper for the rule-based verdict."""
+    return engine.compute_verdict(symbol)
+
+
+# Colour for each verdict label, on a red (bad) -> green (good) scale.
+# These names are Streamlit's built-in markdown colours (e.g. :green[...]).
+VERDICT_COLORS = {
+    "Sell": "red",
+    "Hold": "orange",
+    "Buy": "green",
+    "Strong Buy": "green",
+}
+
+
 def _abbreviate(number):
     """Shorten big numbers for display: 4_362_291_642_368 -> '4.36T'."""
     number = float(number)
@@ -126,6 +142,22 @@ def make_candlestick(df):
     return wicks + bodies
 
 
+def make_volume_chart(df):
+    """
+    A subtle volume sub-panel (muted grey bars, short height) to sit beneath the
+    price chart. Kept visually secondary so the price stays the focus.
+    """
+    return (
+        alt.Chart(df)
+        .mark_bar(color="#9aa0a6", opacity=0.6)  # muted grey, semi-transparent
+        .encode(
+            x=alt.X("Date:T", title=None),
+            y=alt.Y("Volume:Q", title="Volume"),
+        )
+        .properties(height=120)  # short, so it doesn't dominate the price chart
+    )
+
+
 # --- Page content ---------------------------------------------------------
 
 st.title("📈 Stock Analysis App")
@@ -178,6 +210,40 @@ if symbol:
         exchange = quote.exchange or "unknown exchange"
         st.caption(f"{quote.symbol} · {exchange}")
 
+        # --- Verdict (rule-based, code-only) ----------------------------
+        st.divider()
+        try:
+            verdict = load_verdict(symbol)
+        except Exception:
+            verdict = None
+
+        if verdict is not None and verdict.found and verdict.enough_data:
+            color = VERDICT_COLORS.get(verdict.label, "gray")
+            # Big, colour-coded label + score.
+            st.markdown(
+                f"### Verdict: :{color}[**{verdict.label}**] "
+                f"· score {verdict.score:.0f}/100"
+            )
+            # Visual 0..100 bar (50 = neutral).
+            st.progress(int(round(verdict.score)))
+            st.caption(
+                "⚠️ Automated, rule-based opinion from public data — "
+                "**not financial advice.**"
+            )
+            # Full transparency: every rule, what it saw, and its points.
+            with st.expander("Why this verdict? (how it was calculated)"):
+                st.caption(
+                    f"Base score {verdict.score:.1f}/100 from "
+                    f"{len(verdict.breakdown)} signals "
+                    f"(50 = neutral; each signal adds or subtracts points)."
+                )
+                for s in verdict.breakdown:
+                    sign = "+" if s.points > 0 else ""  # minus prints itself
+                    st.write(f"- **{s.name}** — {s.measured} → **{sign}{s.points}**")
+        elif verdict is not None and verdict.found and not verdict.enough_data:
+            st.info(f"Verdict: {verdict.reason}")
+        # (If the ticker wasn't found at all, the not-found error above covers it.)
+
         # --- Price history chart ----------------------------------------
         st.divider()
         st.markdown("### Price history")
@@ -216,22 +282,33 @@ if symbol:
         if not history.found:
             # Empty range (common for 1D/1W intraday on the free tier).
             st.info(f"No chart data for {range_key}: {history.reason}")
-        elif chart_type == "Line":
-            closes = history.data.set_index("Date")["Close"]
-            if as_percent:
-                # Each point as % difference from the first close of the range.
-                pct = (closes / closes.iloc[0] - 1) * 100
-                pct.name = "% change"
-                st.line_chart(pct)
-            else:
-                # Built-in line chart: closing price over time.
-                st.line_chart(closes)
         else:
-            # Candlestick always shows price (open/high/low/close).
-            if as_percent:
-                st.caption("ℹ️ % view applies to the line chart; "
-                           "candlestick stays in price.")
-            st.altair_chart(make_candlestick(history.data), width="stretch")
+            # --- Price chart (line or candlestick) ---
+            if chart_type == "Line":
+                closes = history.data.set_index("Date")["Close"]
+                if as_percent:
+                    # Each point as % difference from the first close of the range.
+                    pct = (closes / closes.iloc[0] - 1) * 100
+                    pct.name = "% change"
+                    st.line_chart(pct)
+                else:
+                    # Built-in line chart: closing price over time.
+                    st.line_chart(closes)
+            else:
+                # Candlestick always shows price (open/high/low/close).
+                if as_percent:
+                    st.caption("ℹ️ % view applies to the line chart; "
+                               "candlestick stays in price.")
+                st.altair_chart(make_candlestick(history.data), width="stretch")
+
+            # --- Subtle volume sub-panel ---
+            # Only show it when there's real volume data for this range; if it's
+            # missing or all-zero (can happen on some ranges), hide it quietly.
+            if "Volume" in history.data.columns:
+                volumes = history.data["Volume"].dropna()
+                if len(volumes) > 0 and float(volumes.sum()) > 0:
+                    st.caption("Volume")
+                    st.altair_chart(make_volume_chart(history.data), width="stretch")
 
         # --- Company analysis (the business) ----------------------------
         st.divider()

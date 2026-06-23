@@ -474,3 +474,226 @@ def get_stock_technicals(ticker: str) -> MetricGroup:
         "avg_volume":  _metric("Avg volume", info.get("averageVolume"), "int_large", "info.averageVolume"),
     }
     return MetricGroup(True, display, currency, metrics)
+
+
+# --- Deterministic verdict (Step 4) --------------------------------------
+
+# The four possible verdict labels, worst -> best.
+VERDICT_LABELS = ["Sell", "Hold", "Buy", "Strong Buy"]
+
+# We need at least this many usable signals to dare give a verdict.
+MIN_SIGNALS = 4
+
+
+@dataclass
+class Signal:
+    """
+    One rule's contribution to the verdict.
+
+    - `name`     : what the rule looks at, e.g. "Valuation (P/E)".
+    - `measured` : the value it saw, in words, e.g. "P/E = 35.9 (expensive)".
+    - `points`   : how many points it added (+) or removed (-). Each signal is
+                   capped at +/-2, so the score maths stay simple.
+    """
+    name: str
+    measured: str
+    points: int
+
+
+@dataclass
+class Verdict:
+    """
+    The rule-based verdict result.
+
+    - found       : False if the ticker doesn't exist at all.
+    - enough_data : False if we found the ticker but had too few signals to
+                    judge it (then `label`/`score` stay empty and `reason`
+                    explains).
+    - label       : one of VERDICT_LABELS (when enough_data).
+    - score       : 0..100 (50 = neutral); higher = more bullish.
+    - breakdown   : the list of Signals, the basis for "explain how it was
+                    calculated".
+    """
+    found: bool
+    symbol: str
+    label: str = ""
+    score: Optional[float] = None
+    breakdown: list = field(default_factory=list)
+    enough_data: bool = True
+    reason: str = ""
+
+
+# Each signal contributes at most this many points (positive or negative).
+# Used as the denominator so the score scales onto a fixed 0..100 range.
+_MAX_POINTS_PER_SIGNAL = 2
+
+
+def _label_for_score(score: float) -> str:
+    """Map a 0..100 score onto a verdict label, with conservative bands."""
+    if score < 35:
+        return "Sell"
+    if score < 55:
+        return "Hold"
+    if score < 75:
+        return "Buy"
+    return "Strong Buy"
+
+
+def compute_verdict(ticker: str) -> Verdict:
+    """
+    Produce a transparent, rule-based Buy/Hold/Sell-style verdict from the
+    fundamentals and technicals we already collect. No LLM, no analyst data —
+    just clearly-defined rules, each contributing points to a base score.
+
+    Every rule is skipped gracefully if its input is missing, so sparse tickers
+    simply get fewer signals (and "not enough data" if too few).
+    """
+    symbol = (ticker or "").strip()
+    display = symbol.upper()
+    if not symbol:
+        return Verdict(False, display, reason="No ticker given.")
+
+    # Reuse the building blocks we already have. Any failure -> not found.
+    try:
+        quote = get_stock_quote(symbol)
+        company = get_company_metrics(symbol)
+        technicals = get_stock_technicals(symbol)
+    except Exception as error:
+        return Verdict(False, display, reason=f"Error computing verdict: {error}")
+
+    # If none of the three sources recognised the ticker, it doesn't exist.
+    if not quote.found and not company.found and not technicals.found:
+        return Verdict(False, display, reason="Ticker not found.")
+
+    # Small helper: pull a metric's value, or None if missing/not available.
+    def value_of(group, key):
+        metric = group.metrics.get(key) if group.found else None
+        return metric.value if (metric and metric.available) else None
+
+    price = quote.price if quote.found else None
+    pe = value_of(company, "pe")
+    forward_pe = value_of(company, "forward_pe")
+    margin = value_of(company, "profit_margin")
+    debt_to_equity = value_of(company, "debt_to_equity")
+    free_cash_flow = value_of(company, "free_cash_flow")
+    ma50 = value_of(technicals, "ma50")
+    ma200 = value_of(technicals, "ma200")
+    rsi = value_of(technicals, "rsi")
+    high52 = value_of(technicals, "week52_high")
+    low52 = value_of(technicals, "week52_low")
+
+    signals: list = []
+
+    def add(name, measured, points):
+        signals.append(Signal(name, measured, points))
+
+    # 1) Valuation — trailing P/E vs reasonable bands.
+    if _is_number(pe):
+        if pe <= 0:
+            add("Valuation (P/E)", f"P/E = {pe:.1f} (no positive earnings)", -1)
+        elif pe <= 15:
+            add("Valuation (P/E)", f"P/E = {pe:.1f} (cheap)", +2)
+        elif pe <= 25:
+            add("Valuation (P/E)", f"P/E = {pe:.1f} (fair)", +1)
+        elif pe <= 40:
+            add("Valuation (P/E)", f"P/E = {pe:.1f} (full)", 0)
+        else:
+            add("Valuation (P/E)", f"P/E = {pe:.1f} (expensive)", -1)
+
+    # 2) Earnings outlook — forward P/E lower than trailing means earnings are
+    #    expected to grow (cheaper on next year's profits).
+    if _is_number(pe) and _is_number(forward_pe) and pe > 0 and forward_pe > 0:
+        if forward_pe < pe:
+            add("Earnings outlook (fwd P/E)",
+                f"forward {forward_pe:.1f} < trailing {pe:.1f} (improving)", +1)
+        elif forward_pe > pe:
+            add("Earnings outlook (fwd P/E)",
+                f"forward {forward_pe:.1f} > trailing {pe:.1f} (softening)", -1)
+        else:
+            add("Earnings outlook (fwd P/E)", f"forward = trailing ({pe:.1f})", 0)
+
+    # 3) Profitability — net profit margin (stored as a fraction).
+    if _is_number(margin):
+        pct = margin * 100
+        if margin <= 0:
+            add("Profitability (margin)", f"margin {pct:.1f}% (unprofitable)", -2)
+        elif margin < 0.05:
+            add("Profitability (margin)", f"margin {pct:.1f}% (thin)", 0)
+        elif margin < 0.20:
+            add("Profitability (margin)", f"margin {pct:.1f}% (healthy)", +1)
+        else:
+            add("Profitability (margin)", f"margin {pct:.1f}% (strong)", +2)
+
+    # 4) Financial health — debt-to-equity (yfinance reports it %-style, e.g. 79).
+    if _is_number(debt_to_equity):
+        if debt_to_equity < 50:
+            add("Leverage (debt/equity)", f"D/E = {debt_to_equity:.0f} (low)", +1)
+        elif debt_to_equity <= 150:
+            add("Leverage (debt/equity)", f"D/E = {debt_to_equity:.0f} (moderate)", 0)
+        else:
+            add("Leverage (debt/equity)", f"D/E = {debt_to_equity:.0f} (high)", -1)
+
+    # 5) Financial health — free cash flow positive or negative.
+    if _is_number(free_cash_flow):
+        if free_cash_flow > 0:
+            add("Free cash flow", "positive free cash flow", +1)
+        else:
+            add("Free cash flow", "negative free cash flow", -1)
+
+    # 6) Trend — price above/below its 50-day moving average.
+    if _is_number(price) and _is_number(ma50):
+        if price >= ma50:
+            add("Trend (vs 50-day MA)", f"price {price:.2f} >= 50d MA {ma50:.2f}", +1)
+        else:
+            add("Trend (vs 50-day MA)", f"price {price:.2f} < 50d MA {ma50:.2f}", -1)
+
+    # 7) Trend — price above/below its 200-day moving average.
+    if _is_number(price) and _is_number(ma200):
+        if price >= ma200:
+            add("Trend (vs 200-day MA)", f"price {price:.2f} >= 200d MA {ma200:.2f}", +1)
+        else:
+            add("Trend (vs 200-day MA)", f"price {price:.2f} < 200d MA {ma200:.2f}", -1)
+
+    # 8) Trend — 50-day vs 200-day (golden cross = up, death cross = down).
+    if _is_number(ma50) and _is_number(ma200):
+        if ma50 >= ma200:
+            add("MA cross (50 vs 200)",
+                f"50d {ma50:.2f} >= 200d {ma200:.2f} (golden cross)", +1)
+        else:
+            add("MA cross (50 vs 200)",
+                f"50d {ma50:.2f} < 200d {ma200:.2f} (death cross)", -1)
+
+    # 9) Momentum — RSI overbought (>70) / oversold (<30) / neutral.
+    if _is_number(rsi):
+        if rsi > 70:
+            add("Momentum (RSI)", f"RSI {rsi:.0f} (overbought)", -1)
+        elif rsi < 30:
+            add("Momentum (RSI)", f"RSI {rsi:.0f} (oversold)", +1)
+        else:
+            add("Momentum (RSI)", f"RSI {rsi:.0f} (neutral)", 0)
+
+    # 10) Position within the 52-week range (relative strength).
+    if (_is_number(price) and _is_number(high52) and _is_number(low52)
+            and high52 > low52):
+        position = (price - low52) / (high52 - low52)
+        pct = position * 100
+        if position >= 0.5:
+            add("52-week range position", f"{pct:.0f}% of range (upper half)", +1)
+        else:
+            add("52-week range position", f"{pct:.0f}% of range (lower half)", -1)
+
+    # Too few signals -> say so rather than give a misleading verdict.
+    n_signals = len(signals)
+    if n_signals < MIN_SIGNALS:
+        return Verdict(
+            True, display, breakdown=signals, enough_data=False,
+            reason=f"Not enough data for a verdict (only {n_signals} signal(s)).")
+
+    # Sum the points and scale onto 0..100 (50 = perfectly neutral).
+    raw_points = sum(s.points for s in signals)
+    denominator = _MAX_POINTS_PER_SIGNAL * n_signals  # max possible swing
+    score = 50 + 50 * (raw_points / denominator)
+    score = max(0.0, min(100.0, score))  # clamp into [0, 100]
+
+    return Verdict(True, display, label=_label_for_score(score), score=score,
+                   breakdown=signals, enough_data=True)
