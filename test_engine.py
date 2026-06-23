@@ -21,6 +21,8 @@ import pandas as pd
 from engine import (
     get_stock_quote,
     get_price_history,
+    first_close,
+    price_to_pct_change,
     get_company_metrics,
     get_stock_technicals,
     compute_verdict,
@@ -444,6 +446,43 @@ def expect_unconfirmed_move_logic():
           f"{result['ratio']:.2f} -> {result['state']}")
 
 
+def expect_pct_change_mapping():
+    """Synthetic (no network): the % mapping used by the chart's normalised line
+    and the candlestick's linked right-hand axis. The start bar must read exactly
+    0%, and later bars must be (price / first_close - 1) * 100."""
+    df = pd.DataFrame({
+        "Date": pd.to_datetime(["2026-01-01", "2026-01-02", "2026-01-03",
+                                "2026-01-04"]),
+        "Close": [100.0, 110.0, 90.0, 150.0],
+    })
+
+    base = first_close(df)
+    assert base == 100.0, f"expected first close 100.0, got {base!r}"
+
+    # The start bar is the 0% baseline by construction (exactly 0, no rounding).
+    assert price_to_pct_change(base, base) == 0.0, "start bar must map to 0%"
+
+    # A few hand-checked points: +10%, -10%, +50% (tolerant of float rounding).
+    def _close(a, b):
+        return abs(a - b) < 1e-9
+    assert _close(price_to_pct_change(110.0, base), 10.0)
+    assert _close(price_to_pct_change(90.0, base), -10.0)
+    assert _close(price_to_pct_change(150.0, base), 50.0)
+
+    # Vectorised over the whole Close column: first element is exactly 0%.
+    pct = price_to_pct_change(df["Close"], base)
+    assert pct.iloc[0] == 0.0, f"first % must be 0, got {pct.iloc[0]}"
+    expected = [0.0, 10.0, -10.0, 50.0]
+    assert all(_close(a, b) for a, b in zip(pct, expected)), \
+        f"unexpected % series {list(pct)}"
+
+    # Missing / empty data is handled (callers skip the % view instead of crashing).
+    assert first_close(pd.DataFrame({"Close": []})) is None, "empty -> None"
+    assert first_close(pd.DataFrame({"Open": [1.0]})) is None, "no Close -> None"
+
+    print(f"      % mapping: start={base:.0f} -> 0%, series {list(pct)}")
+
+
 def main():
     print("Running engine tests against live Yahoo Finance data...\n")
 
@@ -527,6 +566,11 @@ def main():
     # Step 6: pure watchlist list helpers.
     results.append(check("watchlist add/remove/dedupe logic",
                          lambda: expect_watchlist_logic()))
+
+    # Chart %-change mapping (start bar = 0%), used by the line and the
+    # candlestick's linked right-hand % axis.
+    results.append(check("percent-change mapping (start bar = 0%)",
+                         lambda: expect_pct_change_mapping()))
 
     passed = sum(results)
     total = len(results)

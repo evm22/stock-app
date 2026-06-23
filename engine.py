@@ -394,6 +394,37 @@ def get_price_history(ticker: str, range_key: str) -> PriceHistory:
     return PriceHistory(True, display_symbol, range_key, period, interval, data=df)
 
 
+def first_close(df) -> Optional[float]:
+    """
+    The first (range-start) closing price in a price-history table.
+
+    This is the 0% baseline for the "% change from start of range" views:
+    every later price is expressed relative to it, so the start bar itself is
+    exactly 0%. Returns None when there's no usable Close column (so callers
+    can skip the % view rather than divide by nothing).
+    """
+    if df is None or "Close" not in getattr(df, "columns", []):
+        return None
+    closes = df["Close"].dropna()
+    if closes.empty:
+        return None
+    return float(closes.iloc[0])
+
+
+def price_to_pct_change(price, base):
+    """
+    Map an absolute price to its cumulative % change from `base`.
+
+    `base` is the range-start close (see first_close), so the start bar maps to
+    exactly 0%, a price 10% above it maps to +10, and so on. Works for a single
+    number or a whole pandas Series/array (vectorised), which is why both the
+    normalised % line and the candlestick's linked right-hand % axis use it:
+
+        pct = (price / base - 1) * 100
+    """
+    return (price / base - 1) * 100
+
+
 # --- Company & stock metrics (Step 3) ------------------------------------
 
 @dataclass

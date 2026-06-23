@@ -156,12 +156,19 @@ def render_metrics(group, keys=None, columns_per_row=3):
                           help=engine.HELP_TEXTS.get(key))
 
 
-def make_candlestick(df):
+def make_candlestick(df, pct_first_close=None):
     """
     Build a simple candlestick chart from a price-history table using Altair.
 
     Each candle has a thin "wick" (the day's low-to-high range) and a thick
     "body" (open-to-close). Green means the price closed up, red means down.
+
+    When `pct_first_close` is given (the range-start close), a SECONDARY right-
+    hand y-axis labelled "% change" is added, linked to the left price axis so
+    the range-start close reads 0%. No second line is drawn: because % change is
+    a linear function of price, an explicit % domain computed from the same
+    price domain maps pixel-for-pixel onto the candles (see engine.first_close /
+    engine.price_to_pct_change).
     """
     # Green when close >= open (up day), red otherwise (down day).
     up_down_color = alt.condition(
@@ -173,9 +180,22 @@ def make_candlestick(df):
         x=alt.X("Date:T", title=None),
         color=up_down_color,
     )
+
+    # Left ($) axis. When we add the linked % axis we pin the price domain to the
+    # data's Low..High (with a little padding) so the right axis can line up with
+    # it exactly; otherwise we let Altair auto-fit as before.
+    if pct_first_close:
+        low = float(df["Low"].min())
+        high = float(df["High"].max())
+        pad = (high - low) * 0.05 or 1.0  # small breathing room, like the default
+        low, high = low - pad, high + pad
+        price_scale = alt.Scale(zero=False, nice=False, domain=[low, high])
+    else:
+        price_scale = alt.Scale(zero=False)
+
     # The wick: a vertical line from Low to High.
     wicks = base.mark_rule().encode(
-        y=alt.Y("Low:Q", title="Price", scale=alt.Scale(zero=False)),
+        y=alt.Y("Low:Q", title="Price", scale=price_scale),
         y2="High:Q",
     )
     # The body: a bar from Open to Close.
@@ -183,7 +203,33 @@ def make_candlestick(df):
         y="Open:Q",
         y2="Close:Q",
     )
-    return wicks + bodies
+    candles = wicks + bodies
+
+    if not pct_first_close:
+        return candles
+
+    # Secondary right-hand "% change" axis, linked to the left price axis. We map
+    # the SAME price domain through engine.price_to_pct_change so the two scales
+    # share endpoints; an invisible mark just carries the axis (no extra line).
+    pct_low = engine.price_to_pct_change(low, pct_first_close)
+    pct_high = engine.price_to_pct_change(high, pct_first_close)
+    pct_axis = (
+        alt.Chart(df)
+        .mark_point(opacity=0)  # invisible: we only want its right-hand axis
+        .transform_calculate(pct=f"(datum.Close / {pct_first_close} - 1) * 100")
+        .encode(
+            x=alt.X("Date:T", title=None),
+            y=alt.Y(
+                "pct:Q",
+                title="% change",
+                scale=alt.Scale(zero=False, nice=False, domain=[pct_low, pct_high]),
+                axis=alt.Axis(orient="right", format="+.1f"),
+            ),
+        )
+    )
+    # Independent y scales let the price layer and the % layer keep their own
+    # domains while sharing the exact same plotting area, so they stay aligned.
+    return alt.layer(candles, pct_axis).resolve_scale(y="independent")
 
 
 def make_volume_chart(df):
@@ -593,23 +639,29 @@ if symbol:
             # Empty range (common for 1D/1W intraday on the free tier).
             st.info(f"No chart data for {range_key}: {history.reason}")
         else:
-            if as_percent:
-                # % view: a normalised line (start of range = 0%). This is the
-                # percent representation for BOTH chart types, so the toggle
-                # always does something.
+            if chart_type == "Candlestick":
+                # Candles always plot price ($) on the LEFT axis. With % ON we
+                # keep the candles and add a linked RIGHT "% change" axis instead
+                # of swapping in a line (for one stock the % line would just trace
+                # the same path as the candles — see engine.price_to_pct_change).
+                base_close = engine.first_close(history.data) if as_percent else None
+                st.altair_chart(
+                    make_candlestick(history.data, pct_first_close=base_close),
+                    width="stretch",
+                )
+                if base_close:
+                    st.caption("ℹ️ Candles show price ($, left axis); the right "
+                               "axis reads cumulative % change from the start of "
+                               "the selected range.")
+            elif as_percent:
+                # Line + % view: a normalised line (start of range = 0%).
                 closes = history.data.set_index("Date")["Close"]
-                pct = (closes / closes.iloc[0] - 1) * 100
+                pct = engine.price_to_pct_change(closes, engine.first_close(history.data))
                 pct.name = "% change"
                 st.line_chart(pct)
-                if chart_type == "Candlestick":
-                    st.caption("ℹ️ % view uses the line representation (percent "
-                               "change from the start of the range).")
-            elif chart_type == "Line":
+            else:
                 # Built-in line chart: closing price over time.
                 st.line_chart(history.data.set_index("Date")["Close"])
-            else:
-                # Candlestick (open/high/low/close) in price terms.
-                st.altair_chart(make_candlestick(history.data), width="stretch")
 
             # --- Subtle volume sub-panel ---
             # Only show it when there's real volume data for this range; if it's
