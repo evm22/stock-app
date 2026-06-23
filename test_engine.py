@@ -25,6 +25,9 @@ from engine import (
     get_stock_technicals,
     compute_verdict,
     find_tickers,
+    add_to_watchlist,
+    remove_from_watchlist,
+    in_watchlist,
     get_analyst_consensus,
     explain_divergence,
     Verdict,
@@ -366,6 +369,24 @@ def expect_growth_aware_verdict(symbol):
           f"1Y {verdict.horizons['1Y'].label}")
 
 
+def expect_watchlist_logic():
+    """Pure watchlist helpers (no network): add de-dupes + normalises + keeps
+    order; remove works; membership check is case-insensitive."""
+    wl = []
+    wl = add_to_watchlist(wl, "aapl")          # lower-case in
+    wl = add_to_watchlist(wl, "MSFT")
+    wl = add_to_watchlist(wl, "AAPL")          # duplicate -> ignored
+    wl = add_to_watchlist(wl, "  teva.ta  ")   # spaces trimmed
+    assert wl == ["AAPL", "MSFT", "TEVA.TA"], f"unexpected watchlist {wl}"
+    assert in_watchlist(wl, "aapl"), "membership should be case-insensitive"
+    assert not in_watchlist(wl, "GOOG")
+    wl = remove_from_watchlist(wl, "msft")
+    assert wl == ["AAPL", "TEVA.TA"], f"unexpected after remove {wl}"
+    wl = add_to_watchlist(wl, "")              # blank ignored
+    assert wl == ["AAPL", "TEVA.TA"], f"blank should be ignored, got {wl}"
+    print(f"      watchlist add/remove/dedupe/normalise OK -> {wl}")
+
+
 def expect_divergence_explained():
     """Synthetic (no network): our Hold vs analysts' Strong Buy must produce a
     'analysts more bullish' explanation that names the signals dragging us down;
@@ -488,6 +509,10 @@ def main():
                          lambda: expect_growth_aware_verdict("AVGO")))
     results.append(check("divergence is explained (synthetic)",
                          lambda: expect_divergence_explained()))
+
+    # Step 6: pure watchlist list helpers.
+    results.append(check("watchlist add/remove/dedupe logic",
+                         lambda: expect_watchlist_logic()))
 
     passed = sum(results)
     total = len(results)

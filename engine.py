@@ -274,6 +274,36 @@ def find_tickers(query: str, max_results: int = 6):
     return matches[:max_results]
 
 
+# --- Watchlist (pure list helpers; storage lives in the UI layer) --------
+
+def normalize_symbol(symbol: str) -> str:
+    """Tidy a ticker for storage/compare: trimmed + upper-case."""
+    return (symbol or "").strip().upper()
+
+
+def add_to_watchlist(watchlist, symbol):
+    """Return a NEW list with `symbol` added (upper-cased, de-duplicated,
+    order preserved). A blank symbol is ignored."""
+    items = [normalize_symbol(s) for s in (watchlist or []) if normalize_symbol(s)]
+    sym = normalize_symbol(symbol)
+    if sym and sym not in items:
+        items.append(sym)
+    return items
+
+
+def remove_from_watchlist(watchlist, symbol):
+    """Return a NEW list with `symbol` removed."""
+    sym = normalize_symbol(symbol)
+    return [normalize_symbol(s) for s in (watchlist or [])
+            if normalize_symbol(s) and normalize_symbol(s) != sym]
+
+
+def in_watchlist(watchlist, symbol) -> bool:
+    """True if `symbol` is already followed."""
+    sym = normalize_symbol(symbol)
+    return sym in [normalize_symbol(s) for s in (watchlist or [])]
+
+
 # --- Price history (for the chart) ---------------------------------------
 
 @dataclass

@@ -1,3 +1,4 @@
 streamlit
 yfinance
 altair
+streamlit-local-storage

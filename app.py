@@ -10,6 +10,9 @@ Run locally with:
     streamlit run app.py
 """
 
+import json
+import os
+
 import altair as alt  # charting library that ships with Streamlit
 import streamlit as st
 
@@ -183,16 +186,127 @@ def make_volume_chart(df):
     )
 
 
+# --- Watchlist (persisted in the browser's localStorage) ------------------
+
+WATCHLIST_KEY = "watchlist"
+
+
+def _local_storage():
+    """A handle to the browser's localStorage, or None if we're not running
+    under a real Streamlit server (e.g. AppTest / bare mode) — then we fall back
+    to session-only state so the UI still works and stays testable. The check
+    matters because the localStorage component blocks waiting for a browser that
+    isn't there during tests."""
+    try:
+        # Test seam: AppTest sets this so we skip the (browser-blocking) component.
+        if os.environ.get("STOCKAPP_DISABLE_BROWSER_STORAGE"):
+            return None
+        from streamlit.runtime import exists
+        if not exists():
+            return None
+        from streamlit_local_storage import LocalStorage
+        return LocalStorage()
+    except Exception:
+        return None
+
+
+def init_watchlist():
+    """Load the followed tickers into session_state once (from localStorage when
+    available) and return the storage handle. localStorage returns None until
+    its component mounts, so we load the first non-None value we see."""
+    ls = _local_storage()
+    if ls is not None and not st.session_state.get("_wl_loaded"):
+        raw = ls.getItem(WATCHLIST_KEY)
+        if raw is not None:
+            try:
+                st.session_state["watchlist"] = list(json.loads(raw) or [])
+            except Exception:
+                st.session_state["watchlist"] = []
+            st.session_state["_wl_loaded"] = True
+    st.session_state.setdefault("watchlist", [])
+    return ls
+
+
+def persist_watchlist(ls):
+    """Write the current watchlist back to the browser (if available)."""
+    if ls is None:
+        return
+    try:
+        ls.setItem(WATCHLIST_KEY, json.dumps(st.session_state["watchlist"]),
+                   key="watchlist_persist")
+    except Exception:
+        pass
+
+
+# These callbacks run at the START of the next rerun (before the script body),
+# so the page below renders with the already-updated watchlist.
+def _toggle_watchlist(symbol):
+    wl = st.session_state.get("watchlist", [])
+    if engine.in_watchlist(wl, symbol):
+        st.session_state["watchlist"] = engine.remove_from_watchlist(wl, symbol)
+    else:
+        st.session_state["watchlist"] = engine.add_to_watchlist(wl, symbol)
+    st.session_state["_wl_dirty"] = True
+
+
+def _remove_watchlist(symbol):
+    st.session_state["watchlist"] = engine.remove_from_watchlist(
+        st.session_state.get("watchlist", []), symbol)
+    st.session_state["_wl_dirty"] = True
+
+
+def _goto(symbol):
+    """A 'View' click pre-fills the search box on the next rerun."""
+    st.session_state["pending_query"] = symbol
+
+
+def render_watchlist_sidebar():
+    """Draw the followed stocks in the sidebar with a compact quote, plus
+    'View' and 'Remove' buttons."""
+    with st.sidebar:
+        st.markdown("### ⭐ Watchlist")
+        watchlist = st.session_state.get("watchlist", [])
+        if not watchlist:
+            st.caption("No stocks yet. Search one and click **Add to watchlist**.")
+            return
+        for sym in watchlist:
+            line = f"**{sym}**"
+            try:
+                q = load_quote(sym)
+                if q and q.found:
+                    ccy = q.currency or ""
+                    if q.change_pct is not None:
+                        line += f" — {q.price:,.2f} {ccy} ({q.change_pct:+.2f}%)"
+                    else:
+                        line += f" — {q.price:,.2f} {ccy}"
+            except Exception:
+                pass
+            st.markdown(line)
+            cols = st.columns(2)
+            cols[0].button("View", key=f"wl_view_{sym}", on_click=_goto, args=(sym,))
+            cols[1].button("Remove", key=f"wl_rm_{sym}",
+                           on_click=_remove_watchlist, args=(sym,))
+        st.caption("Saved in your browser (localStorage).")
+
+
 # --- Page content ---------------------------------------------------------
 
 st.title("📈 Stock Analysis App")
 st.write("Type a stock ticker symbol and press Enter to look it up.")
+
+# Load the watchlist and draw it in the sidebar. A "View" click stores a
+# pending query that we move into the search box BEFORE the widget is created.
+ls = init_watchlist()
+if "pending_query" in st.session_state:
+    st.session_state["search_box"] = st.session_state.pop("pending_query")
+render_watchlist_sidebar()
 
 # A search box: accepts a ticker, a company name, or a Tel-Aviv (.TA) symbol.
 # .strip() removes accidental spaces; pressing Enter reruns the script.
 query = st.text_input(
     "Ticker, company name, or Tel-Aviv (.TA) symbol",
     placeholder="e.g. AAPL, Microsoft, AVIV.TA, TEVA.TA",
+    key="search_box",
 ).strip()
 
 # Israeli stocks use a .TA ticker on Yahoo (NOT their TASE security number).
@@ -266,6 +380,13 @@ if symbol:
         # One-line note of which exchange this is and the exact symbol used.
         exchange = quote.exchange or "unknown exchange"
         st.caption(f"{quote.symbol} · {exchange}")
+
+        # Follow / unfollow this stock (saved in the browser).
+        following = engine.in_watchlist(st.session_state.get("watchlist", []), symbol)
+        st.button(
+            "★ Remove from watchlist" if following else "⭐ Add to watchlist",
+            key="wl_toggle", on_click=_toggle_watchlist, args=(symbol,),
+        )
 
         # --- Verdict (rule-based, three time horizons) ------------------
         st.divider()
@@ -517,3 +638,9 @@ if symbol:
             # Which fundamentals path supplied the company metrics (Part A).
             if company is not None and getattr(company, "source_note", ""):
                 st.write(f"**Company fundamentals via:** `{company.source_note}`")
+
+
+# At the very end of the run, save the watchlist to the browser if it changed.
+# (Callbacks set "_wl_dirty"; we persist once here so the write happens last.)
+if st.session_state.pop("_wl_dirty", False):
+    persist_watchlist(ls)
