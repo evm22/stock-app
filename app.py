@@ -14,6 +14,7 @@ import json
 import os
 
 import altair as alt  # charting library that ships with Streamlit
+import pandas as pd
 import streamlit as st
 
 import engine  # our pure-Python data engine (no Streamlit inside it)
@@ -208,6 +209,17 @@ def make_candlestick(df, pct_first_close=None):
     if not pct_first_close:
         return candles
 
+    # A faint dashed baseline at the 0% level. In price terms 0% is exactly the
+    # range-start close (pct_first_close), so we draw it on the SAME left price
+    # scale as the candles — that keeps it aligned with them pixel-for-pixel and
+    # marks where the right "% change" axis reads 0. Kept subtle so it never
+    # competes with the candles.
+    baseline = (
+        alt.Chart(pd.DataFrame({"y": [pct_first_close]}))
+        .mark_rule(strokeDash=[4, 4], color="#9e9e9e", opacity=0.7, size=1)
+        .encode(y=alt.Y("y:Q", scale=price_scale))
+    )
+
     # Secondary right-hand "% change" axis, linked to the left price axis. We map
     # the SAME price domain through engine.price_to_pct_change so the two scales
     # share endpoints; an invisible mark just carries the axis (no extra line).
@@ -229,7 +241,7 @@ def make_candlestick(df, pct_first_close=None):
     )
     # Independent y scales let the price layer and the % layer keep their own
     # domains while sharing the exact same plotting area, so they stay aligned.
-    return alt.layer(candles, pct_axis).resolve_scale(y="independent")
+    return alt.layer(candles, baseline, pct_axis).resolve_scale(y="independent")
 
 
 def make_volume_chart(df):
