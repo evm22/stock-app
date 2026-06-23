@@ -1190,3 +1190,145 @@ def compute_verdict(ticker: str) -> Verdict:
     # Weight the shared signals three ways — once per horizon.
     horizons = {h: _score_horizon(h, signals) for h in HORIZONS}
     return Verdict(True, display, horizons=horizons, signals=signals)
+
+
+# --- Analyst consensus (Step 5) ------------------------------------------
+
+# Yahoo's recommendationKey -> a human label.
+_REC_LABELS = {
+    "strong_buy": "Strong Buy", "buy": "Buy", "hold": "Hold",
+    "underperform": "Underperform", "sell": "Sell", "strong_sell": "Strong Sell",
+}
+# Yahoo's "Action" code on an upgrade/downgrade row -> a readable word.
+_ACTION_WORDS = {
+    "up": "upgraded", "down": "downgraded", "main": "maintained",
+    "reit": "reiterated", "init": "initiated",
+}
+
+
+@dataclass
+class AnalystConsensus:
+    """
+    Wall-Street consensus for a stock (from Yahoo's free analyst fields).
+
+    - found        : False if the ticker doesn't exist.
+    - has_coverage : False if the stock simply isn't covered by analysts
+                     (common for small/Tel-Aviv names) -> show a gentle note.
+    - label        : humanized consensus, e.g. "Buy" (for side-by-side vs ours).
+    - mean         : recommendationMean on Yahoo's 1 (Strong Buy)..5 (Sell) scale.
+    - target_*     : mean / high / low / median 12-month price targets.
+    - upside_pct   : mean target vs current price, in %.
+    - actions      : recent upgrades/downgrades (date, firm, grades, target).
+    """
+    found: bool
+    symbol: str
+    has_coverage: bool = False
+    recommendation_key: str = ""
+    label: str = ""
+    mean: Optional[float] = None
+    num_analysts: Optional[int] = None
+    currency: str = ""
+    current_price: Optional[float] = None
+    target_mean: Optional[float] = None
+    target_high: Optional[float] = None
+    target_low: Optional[float] = None
+    target_median: Optional[float] = None
+    upside_pct: Optional[float] = None
+    actions: list = field(default_factory=list)
+    reason: str = ""
+
+
+def _humanize_recommendation(rec_key, mean):
+    """Turn Yahoo's recommendationKey (or the numeric mean) into a label."""
+    if rec_key in _REC_LABELS:
+        return _REC_LABELS[rec_key]
+    if _is_number(mean):
+        if mean <= 1.5:
+            return "Strong Buy"
+        if mean <= 2.5:
+            return "Buy"
+        if mean <= 3.5:
+            return "Hold"
+        if mean <= 4.5:
+            return "Sell"
+        return "Strong Sell"
+    return "n/a"
+
+
+def get_analyst_consensus(ticker: str) -> AnalystConsensus:
+    """
+    Fetch the analyst consensus, mean price target, and recent upgrades/
+    downgrades for a ticker. Never crashes; returns a clear "no coverage" state
+    for stocks analysts don't follow.
+    """
+    symbol = (ticker or "").strip()
+    display = symbol.upper()
+    if not symbol:
+        return AnalystConsensus(False, display)
+
+    info, _ = _fetch_info_resilient(symbol)  # resilient to transient empty .info
+    stock = yf.Ticker(symbol)
+
+    # Real ticker? identity OR a live price.
+    if not _has_identity(info) and not _is_number(_safe(stock.fast_info, "last_price")):
+        return AnalystConsensus(False, display, reason="Ticker not found.")
+
+    currency = info.get("currency") or _safe(stock.fast_info, "currency") or ""
+    current_price = (info.get("currentPrice") or info.get("regularMarketPrice")
+                     or _safe(stock.fast_info, "last_price"))
+
+    rec_key = (info.get("recommendationKey") or "").lower()
+    mean = info.get("recommendationMean")
+    num = info.get("numberOfAnalystOpinions")
+    target_mean = info.get("targetMeanPrice")
+    target_high = info.get("targetHighPrice")
+    target_low = info.get("targetLowPrice")
+    target_median = info.get("targetMedianPrice")
+
+    # "Coverage" = analysts actually rate it.
+    has_coverage = (_is_number(mean) or _is_number(target_mean)
+                    or (rec_key and rec_key != "none"))
+    if not has_coverage:
+        return AnalystConsensus(True, display, has_coverage=False, currency=currency,
+                                current_price=(current_price if _is_number(current_price) else None),
+                                reason="No analyst coverage for this stock.")
+
+    upside_pct = None
+    if _is_number(target_mean) and _is_number(current_price) and current_price:
+        upside_pct = (target_mean / current_price - 1) * 100
+
+    # Recent upgrades/downgrades (most recent first).
+    actions = []
+    try:
+        ud = stock.upgrades_downgrades
+        if ud is not None and len(ud):
+            for date, row in ud.sort_index(ascending=False).head(6).iterrows():
+                target = row.get("currentPriceTarget")
+                actions.append({
+                    "date": str(date)[:10],
+                    "firm": row.get("Firm", "") or "",
+                    "from_grade": row.get("FromGrade", "") or "",
+                    "to_grade": row.get("ToGrade", "") or "",
+                    "action": (row.get("Action", "") or "").lower(),
+                    "price_target": (float(target) if _is_number(target) and target else None),
+                })
+    except Exception:
+        actions = []
+
+    return AnalystConsensus(
+        True, display, has_coverage=True, recommendation_key=rec_key,
+        label=_humanize_recommendation(rec_key, mean),
+        mean=(float(mean) if _is_number(mean) else None),
+        num_analysts=(int(num) if _is_number(num) else None),
+        currency=currency,
+        current_price=(float(current_price) if _is_number(current_price) else None),
+        target_mean=(float(target_mean) if _is_number(target_mean) else None),
+        target_high=(float(target_high) if _is_number(target_high) else None),
+        target_low=(float(target_low) if _is_number(target_low) else None),
+        target_median=(float(target_median) if _is_number(target_median) else None),
+        upside_pct=upside_pct, actions=actions)
+
+
+def humanize_action(action_code):
+    """Public helper for the UI: 'up' -> 'upgraded', etc."""
+    return _ACTION_WORDS.get(action_code, action_code or "rated")

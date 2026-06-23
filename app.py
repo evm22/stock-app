@@ -61,6 +61,12 @@ def load_verdict(symbol):
     return engine.compute_verdict(symbol)
 
 
+@st.cache_data(ttl=600)
+def load_analyst(symbol):
+    """Cached wrapper for the analyst consensus."""
+    return engine.get_analyst_consensus(symbol)
+
+
 # Colour for each verdict label, on a red (bad) -> green (good) scale.
 # These names are Streamlit's built-in markdown colours (e.g. :green[...]).
 VERDICT_COLORS = {
@@ -75,6 +81,12 @@ HORIZON_NAMES = {
     "6M": "6-month (short term)",
     "1Y": "1-year (medium term)",
     "5Y": "5-year (long term)",
+}
+
+# Colour for analyst consensus labels (adds the bearish ones to the scale).
+ANALYST_COLORS = {
+    "Strong Buy": "green", "Buy": "green", "Hold": "orange",
+    "Underperform": "red", "Sell": "red", "Strong Sell": "red",
 }
 
 
@@ -306,6 +318,72 @@ if symbol:
                                 f"base {base_sign}{ws.points} × weight {ws.weight:.1f} "
                                 f"= **{w_sign}{ws.weighted:.1f}**"
                             )
+
+        # --- Our verdict vs analyst consensus (Step 5) ------------------
+        st.divider()
+        st.markdown("### Our verdict vs Wall Street")
+        try:
+            analyst = load_analyst(symbol)
+        except Exception:
+            analyst = None
+
+        if analyst is None or not analyst.found or not analyst.has_coverage:
+            st.info("No analyst coverage for this stock (common for smaller and "
+                    "Tel-Aviv listings) — nothing to compare against here.")
+        else:
+            col_ours, col_street = st.columns(2)
+            with col_ours:
+                st.markdown("**Our verdict (1-year)**")
+                hv = (verdict.horizons.get("1Y")
+                      if verdict is not None and verdict.found else None)
+                if hv is not None and hv.enough_data:
+                    c = VERDICT_COLORS.get(hv.label, "gray")
+                    st.markdown(f":{c}[**{hv.label}**] · {hv.score:.0f}/100")
+                else:
+                    st.markdown("n/a")
+                st.caption("rule-based, from price + fundamentals")
+            with col_street:
+                st.markdown("**Analyst consensus**")
+                c = ANALYST_COLORS.get(analyst.label, "gray")
+                st.markdown(f":{c}[**{analyst.label}**]")
+                if analyst.mean is not None:
+                    st.caption(f"mean rating {analyst.mean:.2f}/5 from "
+                               f"{analyst.num_analysts or '?'} analysts")
+
+            # Mean price target vs current price (implied upside / downside).
+            if analyst.target_mean and analyst.current_price:
+                cur = analyst.currency or ""
+                up = analyst.upside_pct or 0.0
+                arrow = "🔺" if up >= 0 else "🔻"
+                sign = "+" if up >= 0 else ""
+                st.write(
+                    f"**Mean price target:** {analyst.target_mean:,.2f} {cur} "
+                    f"({arrow} {sign}{up:.1f}% vs current {analyst.current_price:,.2f})"
+                )
+                if analyst.target_low and analyst.target_high:
+                    st.caption(f"analyst range {analyst.target_low:,.2f} - "
+                               f"{analyst.target_high:,.2f} {cur}")
+
+            # Recent upgrades / downgrades.
+            if analyst.actions:
+                with st.expander("Recent analyst actions (upgrades / downgrades)"):
+                    for a in analyst.actions:
+                        verb = engine.humanize_action(a["action"])
+                        if a["from_grade"] and a["from_grade"] != a["to_grade"]:
+                            grade = f"{a['from_grade']} -> {a['to_grade']}"
+                        else:
+                            grade = a["to_grade"] or "-"
+                        target = (f" · target {a['price_target']:,.0f}"
+                                  if a.get("price_target") else "")
+                        st.write(f"- **{a['date']}** {a['firm']}: {verb} "
+                                 f"({grade}){target}")
+
+        # Link out — per-site analyst scores are often paywalled.
+        st.caption(
+            f"More detail on [Yahoo Finance]"
+            f"(https://finance.yahoo.com/quote/{symbol}/analysis). "
+            "Per-site analyst scores (e.g. TipRanks) are often paywalled."
+        )
 
         # --- Price history chart ----------------------------------------
         st.divider()

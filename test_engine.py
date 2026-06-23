@@ -25,6 +25,7 @@ from engine import (
     get_stock_technicals,
     compute_verdict,
     find_tickers,
+    get_analyst_consensus,
     VERDICT_LABELS,
     HORIZONS,
     RANGES,
@@ -313,6 +314,39 @@ def expect_find_number_unresolvable(number):
         f"expected no matches for bare number {number!r}, got {[m.symbol for m in matches]}"
 
 
+ANALYST_LABELS = ["Strong Buy", "Buy", "Hold", "Underperform", "Sell", "Strong Sell"]
+
+
+def expect_analyst_coverage(symbol):
+    """A covered stock returns a consensus label, a sane mean rating + target,
+    and some recent analyst actions."""
+    a = get_analyst_consensus(symbol)
+    assert a.found, f"{symbol}: analyst consensus reported not-found"
+    assert a.has_coverage, f"{symbol}: expected analyst coverage ({a.reason})"
+    assert a.label in ANALYST_LABELS, f"{symbol}: bad consensus label {a.label!r}"
+    if a.mean is not None:
+        assert 1.0 <= a.mean <= 5.0, f"{symbol}: mean rating out of range {a.mean}"
+    if a.target_mean is not None:
+        assert a.target_mean > 0, f"{symbol}: target should be positive {a.target_mean}"
+    assert a.actions, f"{symbol}: expected recent analyst actions"
+    print(f"      {symbol}: analyst {a.label} (mean {a.mean}, {a.num_analysts} analysts), "
+          f"target {a.target_mean}, {len(a.actions)} actions")
+
+
+def expect_analyst_no_coverage(symbol):
+    """A real-but-uncovered stock (e.g. small Tel-Aviv name) is found but flagged
+    has_coverage=False — not a crash."""
+    a = get_analyst_consensus(symbol)
+    assert a.found, f"{symbol}: expected found=True"
+    assert not a.has_coverage, f"{symbol}: expected NO analyst coverage"
+
+
+def expect_analyst_not_found(symbol):
+    """A fake ticker -> not found."""
+    a = get_analyst_consensus(symbol)
+    assert not a.found, f"{symbol}: expected not-found"
+
+
 def expect_unconfirmed_move_logic():
     """Synthetic check (no network): a strong recent GAIN on BELOW-average
     volume must be flagged 'unconfirmed' — the basis for the -2 verdict rule."""
@@ -391,6 +425,15 @@ def main():
                          lambda: expect_find_includes_ta("TEVA.TA", "TEVA.TA", "Teva")))
     results.append(check("bare TASE number 444018 is unresolvable",
                          lambda: expect_find_number_unresolvable("444018")))
+
+    # Step 5: analyst consensus (covered, uncovered, and invalid).
+    for symbol in ["AAPL", "TEVA"]:
+        results.append(check(f"{symbol} analyst consensus present",
+                             lambda s=symbol: expect_analyst_coverage(s)))
+    results.append(check("AVIV.TA has no analyst coverage (graceful)",
+                         lambda: expect_analyst_no_coverage("AVIV.TA")))
+    results.append(check(f"{INVALID_TICKER} analyst consensus not found",
+                         lambda: expect_analyst_not_found(INVALID_TICKER)))
 
     passed = sum(results)
     total = len(results)
