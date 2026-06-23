@@ -358,6 +358,11 @@ if symbol:
             technicals = None
         if technicals is not None and technicals.found and technicals.metrics:
             render_metrics(technicals)
+            st.caption(
+                "Note: **OBV** and **Accum/Dist** are *estimates* of buying/"
+                "selling pressure derived from price + volume — not true "
+                "order-flow data (which isn't available for free)."
+            )
         else:
             st.info("No stock metrics available for this ticker.")
 
@@ -373,3 +378,6 @@ if symbol:
             st.write(quote.sources.get("price_candidates", {}))
             st.write("**Previous-close candidates tried:**")
             st.write(quote.sources.get("prev_candidates", {}))
+            # Which fundamentals path supplied the company metrics (Part A).
+            if company is not None and getattr(company, "source_note", ""):
+                st.write(f"**Company fundamentals via:** `{company.source_note}`")

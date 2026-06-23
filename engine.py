@@ -11,6 +11,7 @@ about showing the result on screen.
 """
 
 import math
+import time
 from dataclasses import dataclass, field
 from typing import Optional
 
@@ -303,12 +304,14 @@ class MetricGroup:
     analysis). `metrics` is an ordered dict of key -> Metric.
 
     `found` is the "is this a real ticker?" signal: False means show a gentle
-    note instead of a table.
+    note instead of a table. `source_note` records which data path supplied the
+    values (handy for the Debug panel — e.g. diagnosing empty .info fetches).
     """
     found: bool
     symbol: str
     currency: str = ""
     metrics: dict = field(default_factory=dict)
+    source_note: str = ""
 
 
 def _metric(label, value, fmt, source):
@@ -338,6 +341,40 @@ def _has_identity(info) -> bool:
                 "regularMarketPrice", "currentPrice"))
 
 
+def _fetch_info_resilient(symbol, attempts: int = 3, pause: float = 0.5):
+    """
+    Fetch yfinance's `info` robustly.
+
+    Problem: `.info` is sometimes empty or partial on a transient rate-limit,
+    even for a perfectly real ticker (the symptom behind "No company metrics
+    available" for MSFT). Fix: try a few times — with a fresh Ticker each time
+    (so we don't get a cached-empty), trying both `.info` and `.get_info()` —
+    and keep the richest response we see.
+
+    Returns (info_dict, source_note). `source_note` records which path won, for
+    the Debug panel.
+    """
+    best, note = {}, "no info returned"
+    for attempt in range(1, attempts + 1):
+        stock = yf.Ticker(symbol)  # fresh each attempt to dodge cached empties
+        for getter, label in (
+            (lambda s: s.info, "ticker.info"),
+            (lambda s: s.get_info(), "ticker.get_info()"),
+        ):
+            try:
+                data = getter(stock) or {}
+            except Exception:
+                data = {}
+            # A response that identifies the company is good enough — stop here.
+            if _has_identity(data):
+                return data, f"{label} (attempt {attempt})"
+            if len(data) > len(best):
+                best, note = data, f"{label} partial (attempt {attempt})"
+        if attempt < attempts:
+            time.sleep(pause)  # brief backoff before retrying
+    return best, note
+
+
 def get_company_metrics(ticker: str) -> MetricGroup:
     """
     Fundamentals about the *business* behind the stock (market cap, P/E, EPS,
@@ -350,17 +387,29 @@ def get_company_metrics(ticker: str) -> MetricGroup:
     if not symbol:
         return MetricGroup(False, display)
 
-    try:
-        stock = yf.Ticker(symbol)
-        info = stock.info or {}
-    except Exception:
-        return MetricGroup(False, display)
+    # Resilient fetch: retries + .get_info() fallback (Part A fix).
+    info, source_note = _fetch_info_resilient(symbol)
 
-    # Invalid tickers come back with an essentially empty info dict.
-    if not _has_identity(info):
-        return MetricGroup(False, display)
+    stock = yf.Ticker(symbol)  # for calendar + fast_info fallbacks
 
-    currency = info.get("currency") or ""
+    # Decide if this is a real ticker. Prefer info identity, but if info came
+    # back empty/partial (transient), confirm via fast_info's price — we do NOT
+    # want to falsely report "not found" just because .info was rate-limited.
+    real = _has_identity(info)
+    if not real:
+        fast_price = _safe(stock.fast_info, "last_price")
+        if _is_number(fast_price):
+            real = True
+            source_note += " + fast_info price (info was empty)"
+    if not real:
+        # Genuinely nothing — treat as not found.
+        return MetricGroup(False, display, source_note=source_note)
+
+    # Currency / market cap can fall back to fast_info when info is sparse.
+    currency = info.get("currency") or _safe(stock.fast_info, "currency") or ""
+    market_cap = info.get("marketCap")
+    if not _is_number(market_cap):
+        market_cap = _safe(stock.fast_info, "market_cap")
 
     # Next earnings date reads cleanest from the calendar (a real date object)
     # rather than the raw unix timestamp in info.
@@ -374,7 +423,7 @@ def get_company_metrics(ticker: str) -> MetricGroup:
         next_earnings = None
 
     metrics = {
-        "market_cap":     _metric("Market cap", info.get("marketCap"), "large_money", "info.marketCap"),
+        "market_cap":     _metric("Market cap", market_cap, "large_money", "info/fast_info.marketCap"),
         "pe":             _metric("P/E (trailing)", info.get("trailingPE"), "ratio", "info.trailingPE"),
         "forward_pe":     _metric("Forward P/E", info.get("forwardPE"), "ratio", "info.forwardPE"),
         "eps":            _metric("EPS (trailing)", info.get("trailingEps"), "money", "info.trailingEps"),
@@ -389,7 +438,7 @@ def get_company_metrics(ticker: str) -> MetricGroup:
         "sector":         _metric("Sector", info.get("sector"), "text", "info.sector"),
         "industry":       _metric("Industry", info.get("industry"), "text", "info.industry"),
     }
-    return MetricGroup(True, display, currency, metrics)
+    return MetricGroup(True, display, currency, metrics, source_note=source_note)
 
 
 def _rsi(closes, period: int = 14):
@@ -480,6 +529,102 @@ def _bollinger(closes, period: int = 20, num_std: float = 2.0):
     return float(middle + num_std * band), float(middle), float(middle - num_std * band)
 
 
+# --- Volume-based indicators (estimates of buy/sell pressure) -------------
+# NOTE: OBV and A/D are ESTIMATES of buying/selling pressure inferred from
+# price + volume. They are NOT real order-flow data (which isn't free).
+
+def _obv(closes, volumes):
+    """
+    On-Balance Volume: a running total that ADDS the day's volume on up-close
+    days and SUBTRACTS it on down-close days. Rising OBV = volume favouring
+    up-days (buying pressure); falling = the opposite. Returns the OBV Series,
+    or None if data is too short.
+    """
+    if closes is None or volumes is None or len(closes) < 2:
+        return None
+    direction = closes.diff()          # today's close minus yesterday's
+    step = volumes.astype("float64").copy()
+    step[direction < 0] *= -1          # down day -> subtract that volume
+    step[direction == 0] = 0           # unchanged -> contributes nothing
+    step.iloc[0] = 0                   # no "previous day" for the first row
+    return step.cumsum()
+
+
+def _accum_dist(df):
+    """
+    Accumulation/Distribution line. For each bar:
+      money-flow multiplier = ((Close-Low) - (High-Close)) / (High-Low)
+            (+1 = closed at the high, -1 = closed at the low)
+      money-flow volume     = multiplier * Volume
+      A/D                   = running sum of money-flow volume
+    Rising A/D = accumulation (buying pressure); falling = distribution.
+    Returns the A/D Series, or None if data is too short.
+    """
+    if df is None or len(df) < 2:
+        return None
+    if not all(c in df.columns for c in ("High", "Low", "Close", "Volume")):
+        return None
+    high, low, close, vol = df["High"], df["Low"], df["Close"], df["Volume"]
+    span = (high - low).replace(0, pd.NA)            # avoid divide-by-zero
+    multiplier = ((close - low) - (high - close)) / span
+    multiplier = multiplier.fillna(0.0)              # flat bars -> 0
+    return (multiplier * vol).cumsum()
+
+
+def _trend_state(series, lookback: int = 20):
+    """
+    Classify a series as 'rising' / 'falling' / 'flat' by comparing its latest
+    value to where it was `lookback` bars ago. Returns None if too short.
+    """
+    if series is None or len(series) < lookback + 1:
+        return None
+    now = series.iloc[-1]
+    past = series.iloc[-1 - lookback]
+    if not (_is_number(now) and _is_number(past)):
+        return None
+    if now > past:
+        return "rising"
+    if now < past:
+        return "falling"
+    return "flat"
+
+
+def _volume_confirmation(closes, volumes, recent: int = 5, baseline: int = 50,
+                         move_threshold: float = 3.0):
+    """
+    Is a recent notable PRICE move backed by VOLUME?
+
+      recent_vol = average volume over the last `recent` days
+      avg_vol    = average volume over the last `baseline` days
+      move_pct   = % price change over the last `recent` days
+      ratio      = recent_vol / avg_vol
+
+    A notable move (|move| >= threshold %) on clearly above-average volume is
+    "confirmed"; on clearly below-average volume it's "unconfirmed"; otherwise
+    "neutral". Returns a dict of those values, or None if data is too short.
+    """
+    if (closes is None or volumes is None
+            or len(closes) <= baseline or len(volumes) <= baseline):
+        return None
+    recent_vol = float(volumes.tail(recent).mean())
+    avg_vol = float(volumes.tail(baseline).mean())
+    if not (_is_number(recent_vol) and _is_number(avg_vol)) or avg_vol == 0:
+        return None
+    ratio = recent_vol / avg_vol
+    start = closes.iloc[-1 - recent]
+    move_pct = ((closes.iloc[-1] / start - 1) * 100
+                if _is_number(start) and start != 0 else 0.0)
+    notable = abs(move_pct) >= move_threshold
+    if notable and ratio >= 1.2:
+        state = "confirmed"
+    elif notable and ratio < 0.8:
+        state = "unconfirmed"
+    else:
+        state = "neutral"
+    return {"recent_vol": recent_vol, "avg_vol": avg_vol, "ratio": ratio,
+            "move_pct": move_pct, "state": state}
+
+
 def get_stock_technicals(ticker: str) -> MetricGroup:
     """
     Indicators about the *share price behaviour*: 52-week high/low, 50-day and
@@ -500,7 +645,10 @@ def get_stock_technicals(ticker: str) -> MetricGroup:
 
     # A year of daily closes lets us compute the 50/200-day MAs and RSI.
     history = get_price_history(symbol, "1Y")
-    closes = history.data["Close"] if history.found else None
+    price_df = history.data if history.found else None
+    closes = price_df["Close"] if price_df is not None else None
+    volumes = (price_df["Volume"]
+               if price_df is not None and "Volume" in price_df.columns else None)
 
     # Real ticker if it has identity fields OR we got price history.
     if not _has_identity(info) and not history.found:
@@ -539,6 +687,19 @@ def get_stock_technicals(ticker: str) -> MetricGroup:
         else:
             bb_state = "within bands"
 
+    # Volume-based pressure estimates (OBV, A/D) and volume confirmation.
+    obv_series = _obv(closes, volumes)
+    obv_trend = _trend_state(obv_series)
+    obv_last = (float(obv_series.iloc[-1])
+                if obv_series is not None and len(obv_series) else None)
+
+    ad_series = _accum_dist(price_df)
+    ad_trend = _trend_state(ad_series)
+    ad_last = (float(ad_series.iloc[-1])
+               if ad_series is not None and len(ad_series) else None)
+
+    volconf = _volume_confirmation(closes, volumes)
+
     metrics = {
         "week52_high": _metric("52-week high", high52, "money", "info/history"),
         "week52_low":  _metric("52-week low", low52, "money", "info/history"),
@@ -556,6 +717,27 @@ def get_stock_technicals(ticker: str) -> MetricGroup:
         "bb_middle":   _metric("Bollinger mid (20d SMA)", bb_middle, "money", "computed:closes"),
         "bb_lower":    _metric("Bollinger lower", bb_lower, "money", "computed:closes"),
         "bb_state":    _metric("Bollinger position", bb_state, "text", "computed:closes"),
+        # New in this run: volume-based pressure estimates.
+        "vol_recent":  _metric("Recent volume (5d avg)",
+                               volconf["recent_vol"] if volconf else None,
+                               "int_large", "computed:volume"),
+        "vol_avg":     _metric("Avg volume (50d)",
+                               volconf["avg_vol"] if volconf else None,
+                               "int_large", "computed:volume"),
+        "vol_move":    _metric("5-day price move",
+                               volconf["move_pct"] if volconf else None,
+                               "percent", "computed:price"),
+        "vol_confirm": _metric("Volume confirmation",
+                               volconf["state"] if volconf else None,
+                               "text", "computed:price+volume"),
+        "obv_value":   _metric("OBV (est. pressure)", obv_last, "int_large",
+                               "computed:price+volume"),
+        "obv_trend":   _metric("OBV trend", obv_trend, "text",
+                               "computed:price+volume"),
+        "ad_value":    _metric("Accum/Dist (est.)", ad_last, "int_large",
+                               "computed:price+volume"),
+        "ad_trend":    _metric("A/D trend", ad_trend, "text",
+                               "computed:price+volume"),
     }
     return MetricGroup(True, display, currency, metrics)
 
@@ -592,16 +774,22 @@ HORIZON_WEIGHTS = {
         "rsi": 2.0, "macd": 2.0, "bollinger": 2.0, "ma50": 2.0,
         "range52": 1.5, "ma_cross": 1.5, "ma200": 1.0,
         "pe": 0.5, "fwd_pe": 0.5, "margin": 0.5, "d2e": 0.5, "fcf": 0.5,
+        # Volume signals matter MOST short-term: a move not backed by volume
+        # is fragile, and accumulation/distribution shows near-term pressure.
+        "vol_confirm": 2.0, "obv": 1.5, "ad": 1.5,
     },
     "1Y": {
         "rsi": 1.0, "macd": 1.0, "bollinger": 1.0, "ma50": 1.0,
         "range52": 1.0, "ma_cross": 1.0, "ma200": 1.0,
         "pe": 1.0, "fwd_pe": 1.0, "margin": 1.0, "d2e": 1.0, "fcf": 1.0,
+        "vol_confirm": 1.0, "obv": 1.0, "ad": 1.0,
     },
     "5Y": {
         "pe": 2.0, "margin": 2.0, "fcf": 2.0, "d2e": 1.5, "fwd_pe": 1.5,
         "ma200": 1.5, "ma_cross": 1.0, "range52": 0.5,
         "rsi": 0.3, "macd": 0.3, "bollinger": 0.3, "ma50": 0.3,
+        # Over five years, short-term volume noise barely matters.
+        "vol_confirm": 0.3, "obv": 0.3, "ad": 0.5,
     },
 }
 
@@ -755,6 +943,10 @@ def compute_verdict(ticker: str) -> Verdict:
     macd_signal = value_of(technicals, "macd_signal")
     bb_upper = value_of(technicals, "bb_upper")
     bb_lower = value_of(technicals, "bb_lower")
+    vol_confirm = value_of(technicals, "vol_confirm")  # confirmed/unconfirmed/neutral
+    vol_move = value_of(technicals, "vol_move")        # recent % price move
+    obv_trend = value_of(technicals, "obv_trend")      # rising/falling/flat
+    ad_trend = value_of(technicals, "ad_trend")        # rising/falling/flat
 
     signals: list = []
 
@@ -876,6 +1068,38 @@ def compute_verdict(ticker: str) -> Verdict:
         else:
             add("bollinger", "Bollinger position",
                 f"price {price:.2f} within bands", 0)
+
+    # 13) Volume confirmation — a notable price move SHOULD be backed by volume.
+    #     A strong GAIN on weak volume is the classic unreliable "fake" move, so
+    #     it scores a big NEGATIVE (-2) — enough to pull the (volume-heavy) 6M
+    #     verdict down. A drop on weak volume may not stick (+1). Moves confirmed
+    #     by volume score with their direction.
+    if vol_confirm in ("confirmed", "unconfirmed") and _is_number(vol_move):
+        gain = vol_move > 0
+        if vol_confirm == "unconfirmed" and gain:
+            add("vol_confirm", "Volume confirmation",
+                f"+{vol_move:.1f}% move on weak volume (unconfirmed)", -2)
+        elif vol_confirm == "unconfirmed" and not gain:
+            add("vol_confirm", "Volume confirmation",
+                f"{vol_move:.1f}% move on weak volume (unconfirmed)", +1)
+        elif vol_confirm == "confirmed" and gain:
+            add("vol_confirm", "Volume confirmation",
+                f"+{vol_move:.1f}% move on strong volume (confirmed)", +1)
+        else:  # confirmed drop
+            add("vol_confirm", "Volume confirmation",
+                f"{vol_move:.1f}% move on strong volume (confirmed)", -1)
+
+    # 14) OBV trend — buying pressure (rising) vs selling pressure (falling).
+    if obv_trend == "rising":
+        add("obv", "OBV (buy/sell pressure)", "OBV rising (accumulation)", +1)
+    elif obv_trend == "falling":
+        add("obv", "OBV (buy/sell pressure)", "OBV falling (distribution)", -1)
+
+    # 15) Accumulation/Distribution trend — same idea, price-position weighted.
+    if ad_trend == "rising":
+        add("ad", "Accum/Distribution", "A/D rising (accumulation)", +1)
+    elif ad_trend == "falling":
+        add("ad", "Accum/Distribution", "A/D falling (distribution)", -1)
 
     # Weight the shared signals three ways — once per horizon.
     horizons = {h: _score_horizon(h, signals) for h in HORIZONS}

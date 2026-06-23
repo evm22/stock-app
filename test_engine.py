@@ -16,6 +16,8 @@ connection and an English (non-Hebrew) folder path for it to work locally.
 
 import sys
 
+import pandas as pd
+
 from engine import (
     get_stock_quote,
     get_price_history,
@@ -25,6 +27,7 @@ from engine import (
     VERDICT_LABELS,
     HORIZONS,
     RANGES,
+    _volume_confirmation,
 )
 
 # Well-known tickers we expect to resolve to a real company + positive price.
@@ -108,7 +111,9 @@ COMPANY_KEYS = ["market_cap", "pe", "forward_pe", "eps", "revenue",
 TECH_KEYS = ["week52_high", "week52_low", "ma50", "ma200", "rsi",
              "beta", "avg_volume",
              "macd", "macd_signal", "macd_hist", "macd_state",
-             "bb_upper", "bb_middle", "bb_lower", "bb_state"]
+             "bb_upper", "bb_middle", "bb_lower", "bb_state",
+             "vol_recent", "vol_avg", "vol_move", "vol_confirm",
+             "obv_value", "obv_trend", "ad_value", "ad_trend"]
 
 
 def expect_company_metrics(symbol):
@@ -159,6 +164,22 @@ def expect_stock_technicals(symbol):
     if macd.available and macd_signal.available and macd_hist.available:
         assert abs(macd_hist.value - (macd.value - macd_signal.value)) < 1e-6, \
             "MACD histogram must equal macd - signal"
+
+    # Volume indicators: trend/confirmation states must use the allowed vocab,
+    # and the volume averages must be positive when present.
+    for key in ("obv_trend", "ad_trend"):
+        m = group.metrics[key]
+        if m.available:
+            assert m.value in ("rising", "falling", "flat"), \
+                f"{key} has unexpected value {m.value!r}"
+    vol_confirm = group.metrics["vol_confirm"]
+    if vol_confirm.available:
+        assert vol_confirm.value in ("confirmed", "unconfirmed", "neutral"), \
+            f"vol_confirm has unexpected value {vol_confirm.value!r}"
+    for key in ("vol_recent", "vol_avg"):
+        m = group.metrics[key]
+        if m.available:
+            assert m.value > 0, f"{key} should be positive, got {m.value!r}"
 
     available = sum(1 for k in TECH_KEYS if group.metrics[k].available)
     print(f"      {symbol} technicals: {available}/{len(TECH_KEYS)} fields available")
@@ -241,6 +262,52 @@ def expect_verdict_not_usable(symbol):
             f"expected no usable verdict for {symbol} at {horizon}"
 
 
+def expect_company_resilient(symbol, min_fields=5):
+    """Part A: a real ticker must NOT report 'not found', and should expose
+    several real fundamental fields (the MSFT empty-.info bug)."""
+    group = get_company_metrics(symbol)
+    assert group.found, \
+        f"{symbol}: company metrics reported not-found (Part A regression)"
+    available = sum(1 for m in group.metrics.values() if m.available)
+    assert available >= min_fields, \
+        f"{symbol}: expected >= {min_fields} fundamentals, got {available}"
+    print(f"      {symbol} company: {available} fundamental fields "
+          f"(via {group.source_note})")
+
+
+def expect_volume_signals_in_verdict(symbol):
+    """The OBV and A/D signals should appear in the verdict, weighted more for
+    the short (6M) horizon than the long (5Y) one."""
+    verdict = compute_verdict(symbol)
+    assert verdict.found, f"expected a verdict for {symbol}"
+    keys_present = {s.key for s in verdict.signals}
+    assert "obv" in keys_present, f"{symbol}: OBV signal missing from verdict"
+    assert "ad" in keys_present, f"{symbol}: A/D signal missing from verdict"
+    for key in ("obv", "ad"):
+        w6 = _weight_of(verdict.horizons["6M"], key)
+        w5 = _weight_of(verdict.horizons["5Y"], key)
+        assert w6 is not None and w5 is not None and w6 > w5, \
+            f"{symbol}: expected {key} weight 6M({w6}) > 5Y({w5})"
+    vol_keys = sorted(k for k in keys_present if k in ("vol_confirm", "obv", "ad"))
+    print(f"      {symbol} verdict volume signals: {vol_keys}")
+
+
+def expect_unconfirmed_move_logic():
+    """Synthetic check (no network): a strong recent GAIN on BELOW-average
+    volume must be flagged 'unconfirmed' — the basis for the -2 verdict rule."""
+    # 60 days: flat, then a ~+6% rise over the last 5 days...
+    closes = pd.Series([100.0] * 55 + [100.0, 101.0, 103.0, 104.0, 106.0])
+    # ...but recent volume is far BELOW the longer-run average.
+    volumes = pd.Series([1_000_000.0] * 55 + [200_000.0] * 5)
+    result = _volume_confirmation(closes, volumes)
+    assert result is not None, "expected a volume-confirmation result"
+    assert result["move_pct"] > 3, f"expected a notable gain, got {result['move_pct']}"
+    assert result["state"] == "unconfirmed", \
+        f"expected 'unconfirmed', got {result['state']!r}"
+    print(f"      synthetic spike: +{result['move_pct']:.1f}% on volume ratio "
+          f"{result['ratio']:.2f} -> {result['state']}")
+
+
 def main():
     print("Running engine tests against live Yahoo Finance data...\n")
 
@@ -282,6 +349,18 @@ def main():
                              lambda s=symbol: expect_verdict(s)))
     results.append(check(f"{INVALID_TICKER} yields no usable verdict",
                          lambda: expect_verdict_not_usable(INVALID_TICKER)))
+
+    # Part A: company metrics must be resilient (real fundamentals, not empty).
+    for symbol in ["MSFT", "AAPL"]:
+        results.append(check(f"{symbol} company metrics are resilient",
+                             lambda s=symbol: expect_company_resilient(s)))
+
+    # Part B: volume signals feed the verdict, weighted per horizon.
+    for symbol in ["AAPL", "TEVA"]:
+        results.append(check(f"{symbol} verdict includes volume signals",
+                             lambda s=symbol: expect_volume_signals_in_verdict(s)))
+    results.append(check("unconfirmed gain (synthetic) is flagged",
+                         lambda: expect_unconfirmed_move_logic()))
 
     passed = sum(results)
     total = len(results)
