@@ -188,6 +188,92 @@ def get_stock_quote(ticker: str) -> StockQuote:
     )
 
 
+# --- Search / resolve a query to candidate tickers -----------------------
+
+@dataclass
+class TickerMatch:
+    """One candidate the search turned up: a symbol plus a human label."""
+    symbol: str
+    name: str
+    exchange: str = ""
+    currency: str = ""
+
+
+def _quick_resolve(symbol):
+    """
+    Confirm a symbol is real (has a live price) and grab a display name.
+    Returns a TickerMatch, or None if it doesn't resolve. Uses fast_info for the
+    price (cheap) and falls back to .info only for the name.
+    """
+    try:
+        stock = yf.Ticker(symbol)
+        if not _is_number(_safe(stock.fast_info, "last_price")):
+            return None
+        try:
+            info = stock.info or {}
+        except Exception:
+            info = {}
+        name = info.get("longName") or info.get("shortName") or symbol.upper()
+        exchange = _safe(stock.fast_info, "exchange") or info.get("exchange") or ""
+        currency = _safe(stock.fast_info, "currency") or info.get("currency") or ""
+        return TickerMatch(symbol.upper(), name, exchange, currency)
+    except Exception:
+        return None
+
+
+def find_tickers(query: str, max_results: int = 6):
+    """
+    Turn a free-text query into a list of candidate tickers, so the UI can let
+    the user pick the RIGHT one (e.g. the Tel-Aviv `AVIV.TA`, not a US ETF).
+
+    We combine two sources:
+      1. Yahoo's own search (great for company names and symbols).
+      2. An explicit probe of the `.TA` (Tel-Aviv) variant, because Yahoo's
+         search often misses TASE stocks. This also lets a user paste a numeric
+         TASE security number as `<number>.TA` if Yahoo happens to list it.
+
+    NOTE: Yahoo does NOT map a TASE *security number* (e.g. 444018) to its
+    ticker, so a bare number usually returns nothing — the UI then advises using
+    the `.TA` ticker. Returns a list of TickerMatch (possibly empty).
+    """
+    q = (query or "").strip()
+    if not q:
+        return []
+    q_upper = q.upper()
+    is_numeric = q.isdigit()
+
+    matches = []
+    seen = set()
+
+    def add(symbol, name, exchange):
+        key = (symbol or "").upper()
+        if key and key not in seen:
+            seen.add(key)
+            matches.append(TickerMatch(key, name or key, exchange or "", ""))
+
+    # 1) Yahoo text search — skipped for a bare number (its number search is
+    #    unreliable and returns unrelated funds).
+    if not is_numeric:
+        try:
+            for r in yf.Search(q, max_results=max_results).quotes:
+                add(r.get("symbol"),
+                    r.get("shortname") or r.get("longname"),
+                    r.get("exchange"))
+        except Exception:
+            pass
+
+    # 2) Always probe the Tel-Aviv `.TA` variant (search misses many TASE names).
+    ta_symbol = q_upper if q_upper.endswith(".TA") else q_upper + ".TA"
+    if ta_symbol not in seen:
+        resolved = _quick_resolve(ta_symbol)
+        if resolved:
+            add(resolved.symbol, resolved.name, resolved.exchange)
+
+    # Put an exact match for what the user typed first, so it's the default.
+    matches.sort(key=lambda m: (m.symbol != q_upper, m.symbol != ta_symbol))
+    return matches[:max_results]
+
+
 # --- Price history (for the chart) ---------------------------------------
 
 @dataclass

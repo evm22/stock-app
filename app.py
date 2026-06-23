@@ -32,6 +32,12 @@ def load_quote(symbol):
 
 
 @st.cache_data(ttl=600)
+def load_matches(query):
+    """Cached wrapper for the search resolver (ticker / name / .TA candidates)."""
+    return engine.find_tickers(query)
+
+
+@st.cache_data(ttl=600)
 def load_history(symbol, range_key):
     """Cached wrapper for price history, so flipping ranges back and forth is fast."""
     return engine.get_price_history(symbol, range_key)
@@ -170,17 +176,44 @@ def make_volume_chart(df):
 st.title("📈 Stock Analysis App")
 st.write("Type a stock ticker symbol and press Enter to look it up.")
 
-# A text box for the ticker. Whatever the user types is stored in `symbol`.
+# A search box: accepts a ticker, a company name, or a Tel-Aviv (.TA) symbol.
 # .strip() removes accidental spaces; pressing Enter reruns the script.
-symbol = st.text_input(
-    "Stock ticker",
-    placeholder="e.g. AAPL, MSFT, or an Israeli stock like TEVA.TA",
+query = st.text_input(
+    "Ticker, company name, or Tel-Aviv (.TA) symbol",
+    placeholder="e.g. AAPL, Microsoft, AVIV.TA, TEVA.TA",
 ).strip()
 
-# Small hint: Israeli (Tel Aviv) stocks need a ".TA" suffix on Yahoo Finance.
-st.caption("Tip: for Israeli stocks add `.TA`, e.g. `TEVA.TA`.")
+# Israeli stocks use a .TA ticker on Yahoo (NOT their TASE security number).
+st.caption("Tip: Israeli (Tel Aviv) stocks use a `.TA` ticker, e.g. `AVIV.TA` "
+           "or `TEVA.TA` — not the security number.")
 
-# Only do something once the user has actually typed a symbol.
+# Resolve the query to candidate tickers. If there's more than one match, let
+# the user pick the right one (e.g. the Tel-Aviv AVIV.TA, not a US ETF).
+symbol = None
+if query:
+    try:
+        matches = load_matches(query)
+    except Exception:
+        matches = []
+
+    if not matches:
+        st.error("Couldn't find a matching stock — please check the symbol or name.")
+        st.caption("If it's an Israeli stock, search by its **.TA ticker** (e.g. "
+                   "`AVIV.TA`). Our free data source (Yahoo Finance) can't look up "
+                   "Tel-Aviv stocks by their security number.")
+    elif len(matches) == 1:
+        symbol = matches[0].symbol
+    else:
+        # "Did you mean...?" picker so the user reaches the RIGHT stock.
+        labels = {m.symbol: f"{m.symbol} - {m.name} ({m.exchange or '?'})"
+                  for m in matches}
+        symbol = st.selectbox(
+            "Did you mean...? (pick the right match)",
+            options=[m.symbol for m in matches],
+            format_func=lambda s: labels.get(s, s),
+        )
+
+# Once we have a resolved symbol, run the full analysis on it.
 if symbol:
     # Wrap the data fetch in try/except so a network glitch or unexpected
     # error shows a friendly message instead of a red crash screen.
@@ -190,9 +223,7 @@ if symbol:
         quote = None
 
     if quote is None or not quote.found:
-        # Reached when the engine signalled "not found" (every price source
-        # failed) or an unexpected error occurred.
-        st.error("Couldn't find that ticker — please check the symbol.")
+        st.error("Couldn't load that ticker — please try another.")
     else:
         # Company name as a small heading.
         st.subheader(quote.name)

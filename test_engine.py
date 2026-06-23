@@ -24,6 +24,7 @@ from engine import (
     get_company_metrics,
     get_stock_technicals,
     compute_verdict,
+    find_tickers,
     VERDICT_LABELS,
     HORIZONS,
     RANGES,
@@ -292,6 +293,26 @@ def expect_volume_signals_in_verdict(symbol):
     print(f"      {symbol} verdict volume signals: {vol_keys}")
 
 
+def expect_find_includes_ta(query, expected_symbol, name_contains):
+    """A query for an Israeli stock must surface its .TA ticker among matches."""
+    matches = find_tickers(query)
+    symbols = [m.symbol for m in matches]
+    assert expected_symbol in symbols, \
+        f"expected {expected_symbol} in matches for {query!r}, got {symbols}"
+    match = next(m for m in matches if m.symbol == expected_symbol)
+    assert name_contains.lower() in match.name.lower(), \
+        f"unexpected name for {expected_symbol}: {match.name!r}"
+    print(f"      {query!r} -> {symbols}")
+
+
+def expect_find_number_unresolvable(number):
+    """A bare TASE security number isn't resolvable via Yahoo -> no matches
+    (so the UI can advise using the .TA ticker)."""
+    matches = find_tickers(number)
+    assert matches == [], \
+        f"expected no matches for bare number {number!r}, got {[m.symbol for m in matches]}"
+
+
 def expect_unconfirmed_move_logic():
     """Synthetic check (no network): a strong recent GAIN on BELOW-average
     volume must be flagged 'unconfirmed' — the basis for the -2 verdict rule."""
@@ -361,6 +382,15 @@ def main():
                              lambda s=symbol: expect_volume_signals_in_verdict(s)))
     results.append(check("unconfirmed gain (synthetic) is flagged",
                          lambda: expect_unconfirmed_move_logic()))
+
+    # Search: an Israeli ticker query surfaces its .TA match; a bare TASE
+    # security number is (honestly) unresolvable via Yahoo.
+    results.append(check("AVIV query surfaces AVIV.TA (Mordechai Aviv)",
+                         lambda: expect_find_includes_ta("AVIV", "AVIV.TA", "Aviv")))
+    results.append(check("TEVA.TA resolves via search",
+                         lambda: expect_find_includes_ta("TEVA.TA", "TEVA.TA", "Teva")))
+    results.append(check("bare TASE number 444018 is unresolvable",
+                         lambda: expect_find_number_unresolvable("444018")))
 
     passed = sum(results)
     total = len(results)
