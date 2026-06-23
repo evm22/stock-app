@@ -275,3 +275,202 @@ def get_price_history(ticker: str, range_key: str) -> PriceHistory:
                             reason="No valid price rows for this range.")
 
     return PriceHistory(True, display_symbol, range_key, period, interval, data=df)
+
+
+# --- Company & stock metrics (Step 3) ------------------------------------
+
+@dataclass
+class Metric:
+    """
+    One labelled metric.
+
+    - `value`     : the raw value (number / text / date) or None if missing.
+    - `available` : True when we actually got a usable value (else show "n/a").
+    - `fmt`       : a hint telling the UI how to display it (see app.py).
+    - `source`    : where it came from, for the Debug panel.
+    """
+    label: str
+    value: object
+    available: bool
+    fmt: str = "text"
+    source: str = ""
+
+
+@dataclass
+class MetricGroup:
+    """
+    A named group of metrics (used for both Company analysis and Stock
+    analysis). `metrics` is an ordered dict of key -> Metric.
+
+    `found` is the "is this a real ticker?" signal: False means show a gentle
+    note instead of a table.
+    """
+    found: bool
+    symbol: str
+    currency: str = ""
+    metrics: dict = field(default_factory=dict)
+
+
+def _metric(label, value, fmt, source):
+    """
+    Build a Metric, deciding `available` from the raw value:
+    None or NaN or an empty string -> not available (UI shows "n/a").
+    """
+    if isinstance(value, str):
+        available = bool(value.strip())
+    elif value is None:
+        available = False
+    else:
+        # Numbers: reject NaN. Non-numeric (e.g. a date) is fine as long as
+        # it isn't None.
+        try:
+            available = not math.isnan(float(value))
+        except (TypeError, ValueError):
+            available = True
+    return Metric(label=label, value=value if available else None,
+                  available=available, fmt=fmt, source=source)
+
+
+def _has_identity(info) -> bool:
+    """A real ticker has at least one of these headline fields filled in."""
+    return any(info.get(k) for k in
+               ("longName", "shortName", "marketCap",
+                "regularMarketPrice", "currentPrice"))
+
+
+def get_company_metrics(ticker: str) -> MetricGroup:
+    """
+    Fundamentals about the *business* behind the stock (market cap, P/E, EPS,
+    revenue, margins, dividend, debt, free cash flow, next earnings, sector,
+    industry). Each field may be missing -> we mark it not-available rather
+    than crashing.
+    """
+    symbol = (ticker or "").strip()
+    display = symbol.upper()
+    if not symbol:
+        return MetricGroup(False, display)
+
+    try:
+        stock = yf.Ticker(symbol)
+        info = stock.info or {}
+    except Exception:
+        return MetricGroup(False, display)
+
+    # Invalid tickers come back with an essentially empty info dict.
+    if not _has_identity(info):
+        return MetricGroup(False, display)
+
+    currency = info.get("currency") or ""
+
+    # Next earnings date reads cleanest from the calendar (a real date object)
+    # rather than the raw unix timestamp in info.
+    next_earnings = None
+    try:
+        calendar = stock.calendar or {}
+        dates = calendar.get("Earnings Date") if isinstance(calendar, dict) else None
+        if dates:
+            next_earnings = dates[0]
+    except Exception:
+        next_earnings = None
+
+    metrics = {
+        "market_cap":     _metric("Market cap", info.get("marketCap"), "large_money", "info.marketCap"),
+        "pe":             _metric("P/E (trailing)", info.get("trailingPE"), "ratio", "info.trailingPE"),
+        "forward_pe":     _metric("Forward P/E", info.get("forwardPE"), "ratio", "info.forwardPE"),
+        "eps":            _metric("EPS (trailing)", info.get("trailingEps"), "money", "info.trailingEps"),
+        "revenue":        _metric("Revenue (ttm)", info.get("totalRevenue"), "large_money", "info.totalRevenue"),
+        # profitMargins is a FRACTION (0.27 = 27%) -> percent_frac multiplies by 100.
+        "profit_margin":  _metric("Profit margin", info.get("profitMargins"), "percent_frac", "info.profitMargins"),
+        # dividendYield is ALREADY a percent (0.36 = 0.36%) -> percent shows as-is.
+        "dividend_yield": _metric("Dividend yield", info.get("dividendYield"), "percent", "info.dividendYield"),
+        "debt_to_equity": _metric("Debt-to-equity", info.get("debtToEquity"), "ratio", "info.debtToEquity"),
+        "free_cash_flow": _metric("Free cash flow", info.get("freeCashflow"), "large_money", "info.freeCashflow"),
+        "next_earnings":  _metric("Next earnings", next_earnings, "date", "calendar.EarningsDate"),
+        "sector":         _metric("Sector", info.get("sector"), "text", "info.sector"),
+        "industry":       _metric("Industry", info.get("industry"), "text", "info.industry"),
+    }
+    return MetricGroup(True, display, currency, metrics)
+
+
+def _rsi(closes, period: int = 14):
+    """
+    Relative Strength Index (RSI) — a classic momentum gauge (0..100).
+
+    Intuition: compare the average size of UP days vs DOWN days over the last
+    `period` days. High (70+) = lots of recent gains ("overbought"); low (30-)
+    = lots of recent losses ("oversold").
+
+    Math, step by step:
+      1. delta    = today's close minus yesterday's close (day-to-day change)
+      2. gains    = the positive deltas (down days become 0)
+         losses   = the SIZE of the negative deltas (up days become 0)
+      3. avg_gain = average gain over `period` days
+         avg_loss = average loss over `period` days
+      4. RS  = avg_gain / avg_loss
+         RSI = 100 - 100 / (1 + RS)
+    Returns the most recent RSI, or None if there isn't enough data.
+    """
+    if closes is None or len(closes) < period + 1:
+        return None
+    delta = closes.diff()                 # step 1
+    gains = delta.clip(lower=0)           # step 2: keep positives, else 0
+    losses = -delta.clip(upper=0)         # step 2: negatives as positive sizes
+    avg_gain = gains.rolling(period).mean()   # step 3
+    avg_loss = losses.rolling(period).mean()
+    rs = avg_gain / avg_loss              # step 4 (avg_loss 0 -> inf -> RSI 100)
+    rsi = 100 - (100 / (1 + rs))
+    last = rsi.iloc[-1]
+    return float(last) if _is_number(last) else None
+
+
+def get_stock_technicals(ticker: str) -> MetricGroup:
+    """
+    Indicators about the *share price behaviour*: 52-week high/low, 50-day and
+    200-day moving averages, RSI, beta, average volume.
+
+    Moving averages and RSI are COMPUTED from daily closing prices (a year of
+    history); the rest come from yfinance's info, with sensible fallbacks.
+    """
+    symbol = (ticker or "").strip()
+    display = symbol.upper()
+    if not symbol:
+        return MetricGroup(False, display)
+
+    try:
+        info = yf.Ticker(symbol).info or {}
+    except Exception:
+        info = {}
+
+    # A year of daily closes lets us compute the 50/200-day MAs and RSI.
+    history = get_price_history(symbol, "1Y")
+    closes = history.data["Close"] if history.found else None
+
+    # Real ticker if it has identity fields OR we got price history.
+    if not _has_identity(info) and not history.found:
+        return MetricGroup(False, display)
+
+    currency = info.get("currency") or ""
+
+    # Moving averages = the average of the last N daily closes.
+    ma50 = float(closes.tail(50).mean()) if closes is not None and len(closes) >= 50 else None
+    ma200 = float(closes.tail(200).mean()) if closes is not None and len(closes) >= 200 else None
+    rsi = _rsi(closes)
+
+    # 52-week high/low: prefer yfinance's numbers, else derive from the year.
+    high52 = info.get("fiftyTwoWeekHigh")
+    low52 = info.get("fiftyTwoWeekLow")
+    if not _is_number(high52) and closes is not None:
+        high52 = float(closes.max())
+    if not _is_number(low52) and closes is not None:
+        low52 = float(closes.min())
+
+    metrics = {
+        "week52_high": _metric("52-week high", high52, "money", "info/history"),
+        "week52_low":  _metric("52-week low", low52, "money", "info/history"),
+        "ma50":        _metric("50-day MA", ma50, "money", "computed:closes"),
+        "ma200":       _metric("200-day MA", ma200, "money", "computed:closes"),
+        "rsi":         _metric("RSI (14)", rsi, "ratio", "computed:closes"),
+        "beta":        _metric("Beta", info.get("beta"), "ratio", "info.beta"),
+        "avg_volume":  _metric("Avg volume", info.get("averageVolume"), "int_large", "info.averageVolume"),
+    }
+    return MetricGroup(True, display, currency, metrics)

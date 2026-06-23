@@ -16,7 +16,13 @@ connection and an English (non-Hebrew) folder path for it to work locally.
 
 import sys
 
-from engine import get_stock_quote, get_price_history, RANGES
+from engine import (
+    get_stock_quote,
+    get_price_history,
+    get_company_metrics,
+    get_stock_technicals,
+    RANGES,
+)
 
 # Well-known tickers we expect to resolve to a real company + positive price.
 VALID_TICKERS = ["AAPL", "MSFT", "TEVA"]
@@ -92,6 +98,57 @@ def expect_history_not_found(symbol, range_key):
         f"expected no history for {symbol} {range_key}, but got data"
 
 
+# Keys every company / technicals result must expose (values may be n/a).
+COMPANY_KEYS = ["market_cap", "pe", "forward_pe", "eps", "revenue",
+                "profit_margin", "dividend_yield", "debt_to_equity",
+                "free_cash_flow", "next_earnings", "sector", "industry"]
+TECH_KEYS = ["week52_high", "week52_low", "ma50", "ma200", "rsi",
+             "beta", "avg_volume"]
+
+
+def expect_company_metrics(symbol):
+    """Company metrics should be found, expose all keys, and have a sane mkt cap."""
+    group = get_company_metrics(symbol)
+    assert group.found, f"expected company metrics for {symbol}"
+    for key in COMPANY_KEYS:
+        assert key in group.metrics, f"missing company key '{key}' for {symbol}"
+
+    mc = group.metrics["market_cap"]
+    if mc.available:
+        assert isinstance(mc.value, (int, float)) and mc.value > 0, \
+            f"market cap should be positive, got {mc.value!r}"
+
+    available = sum(1 for k in COMPANY_KEYS if group.metrics[k].available)
+    print(f"      {symbol} company: {available}/{len(COMPANY_KEYS)} fields available")
+
+
+def expect_stock_technicals(symbol):
+    """Technicals should be found, expose all keys, and have sane MA/RSI."""
+    group = get_stock_technicals(symbol)
+    assert group.found, f"expected technicals for {symbol}"
+    for key in TECH_KEYS:
+        assert key in group.metrics, f"missing tech key '{key}' for {symbol}"
+
+    ma50 = group.metrics["ma50"]
+    if ma50.available:
+        assert ma50.value > 0, f"50-day MA should be positive, got {ma50.value!r}"
+
+    rsi = group.metrics["rsi"]
+    if rsi.available:
+        assert 0 <= rsi.value <= 100, f"RSI must be 0..100, got {rsi.value!r}"
+
+    available = sum(1 for k in TECH_KEYS if group.metrics[k].available)
+    print(f"      {symbol} technicals: {available}/{len(TECH_KEYS)} fields available")
+
+
+def expect_metrics_not_found(symbol):
+    """A fake ticker must return not-found for both metric groups, no crash."""
+    company = get_company_metrics(symbol)
+    technicals = get_stock_technicals(symbol)
+    assert not company.found, f"expected company not-found for {symbol}"
+    assert not technicals.found, f"expected technicals not-found for {symbol}"
+
+
 def main():
     print("Running engine tests against live Yahoo Finance data...\n")
 
@@ -115,6 +172,17 @@ def main():
     # An unknown range key should also be handled gracefully.
     results.append(check("an unknown range key is reported as no-data",
                          lambda: expect_history_not_found("AAPL", "99X")))
+
+    # Step 3: company metrics + stock technicals for a couple of real tickers.
+    for symbol in ["AAPL", "TEVA"]:
+        results.append(check(f"{symbol} company metrics present",
+                             lambda s=symbol: expect_company_metrics(s)))
+        results.append(check(f"{symbol} stock technicals present",
+                             lambda s=symbol: expect_stock_technicals(s)))
+
+    # A fake ticker must return not-found for the metric groups too.
+    results.append(check(f"{INVALID_TICKER} metrics are reported as not found",
+                         lambda: expect_metrics_not_found(INVALID_TICKER)))
 
     passed = sum(results)
     total = len(results)

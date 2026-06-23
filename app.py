@@ -37,6 +37,65 @@ def load_history(symbol, range_key):
     return engine.get_price_history(symbol, range_key)
 
 
+@st.cache_data(ttl=600)
+def load_company(symbol):
+    """Cached wrapper for the company fundamentals."""
+    return engine.get_company_metrics(symbol)
+
+
+@st.cache_data(ttl=600)
+def load_technicals(symbol):
+    """Cached wrapper for the stock/technical indicators."""
+    return engine.get_stock_technicals(symbol)
+
+
+def _abbreviate(number):
+    """Shorten big numbers for display: 4_362_291_642_368 -> '4.36T'."""
+    number = float(number)
+    for size, suffix in ((1e12, "T"), (1e9, "B"), (1e6, "M"), (1e3, "K")):
+        if abs(number) >= size:
+            return f"{number / size:,.2f}{suffix}"
+    return f"{number:,.0f}"
+
+
+def format_metric(metric, currency):
+    """
+    Turn a Metric into a display string, using its `fmt` hint. Missing values
+    show as a friendly "n/a". `currency` (e.g. "USD") is appended to money values.
+    """
+    if not metric.available:
+        return "n/a"
+
+    value = metric.value
+    fmt = metric.fmt
+    cur = f" {currency}" if currency else ""
+
+    if fmt == "large_money":   # market cap, revenue, free cash flow
+        return f"{_abbreviate(value)}{cur}"
+    if fmt == "money":         # per-share prices: EPS, 52w high/low, MAs
+        return f"{value:,.2f}{cur}"
+    if fmt == "ratio":         # P/E, debt-to-equity, beta, RSI
+        return f"{value:,.2f}"
+    if fmt == "percent_frac":  # stored as a fraction (0.27) -> 27.15%
+        return f"{value * 100:.2f}%"
+    if fmt == "percent":       # already a percent (0.36) -> 0.36%
+        return f"{value:.2f}%"
+    if fmt == "int_large":     # average volume
+        return _abbreviate(value)
+    # "date" and "text" both just print the value as-is.
+    return str(value)
+
+
+def render_metrics(group, columns_per_row=3):
+    """Show a MetricGroup as a tidy grid of st.metric tiles (n/a when missing)."""
+    items = list(group.metrics.values())
+    for start in range(0, len(items), columns_per_row):
+        row = items[start:start + columns_per_row]
+        columns = st.columns(columns_per_row)
+        for column, metric in zip(columns, row):
+            column.metric(metric.label, format_metric(metric, group.currency))
+
+
 def make_candlestick(df):
     """
     Build a simple candlestick chart from a price-history table using Altair.
@@ -142,6 +201,15 @@ if symbol:
             horizontal=True,
         )
 
+        # Y-axis toggle: actual Price (default) vs % change from the start of
+        # the selected range (normalised so the first point = 0%).
+        as_percent = st.toggle(
+            "Show as % change from start of range",
+            value=False,
+            help="Normalises the line so the start of the range = 0%, showing "
+                 "the percentage gain/loss across the range.",
+        )
+
         # Fetch the candles for the chosen range (cached).
         history = load_history(symbol, range_key)
 
@@ -149,11 +217,47 @@ if symbol:
             # Empty range (common for 1D/1W intraday on the free tier).
             st.info(f"No chart data for {range_key}: {history.reason}")
         elif chart_type == "Line":
-            # Built-in line chart: closing price over time (Date as the x-axis).
-            st.line_chart(history.data.set_index("Date")["Close"])
+            closes = history.data.set_index("Date")["Close"]
+            if as_percent:
+                # Each point as % difference from the first close of the range.
+                pct = (closes / closes.iloc[0] - 1) * 100
+                pct.name = "% change"
+                st.line_chart(pct)
+            else:
+                # Built-in line chart: closing price over time.
+                st.line_chart(closes)
         else:
-            # Candlestick via Altair (open/high/low/close).
+            # Candlestick always shows price (open/high/low/close).
+            if as_percent:
+                st.caption("ℹ️ % view applies to the line chart; "
+                           "candlestick stays in price.")
             st.altair_chart(make_candlestick(history.data), width="stretch")
+
+        # --- Company analysis (the business) ----------------------------
+        st.divider()
+        st.markdown("## Company analysis")
+        st.caption("The business behind the stock.")
+        try:
+            company = load_company(symbol)
+        except Exception:
+            company = None
+        if company is not None and company.found and company.metrics:
+            render_metrics(company)
+        else:
+            st.info("No company metrics available for this ticker.")
+
+        # --- Stock analysis (the share-price behaviour) -----------------
+        st.divider()
+        st.markdown("## Stock analysis")
+        st.caption("How the share price itself has been behaving.")
+        try:
+            technicals = load_technicals(symbol)
+        except Exception:
+            technicals = None
+        if technicals is not None and technicals.found and technicals.metrics:
+            render_metrics(technicals)
+        else:
+            st.info("No stock metrics available for this ticker.")
 
         # Collapsed by default. Open it to see WHICH source gave us the price
         # and every raw value we tried — handy for diagnosing odd tickers.
