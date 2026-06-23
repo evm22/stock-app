@@ -378,6 +378,26 @@ if symbol:
                         st.write(f"- **{a['date']}** {a['firm']}: {verb} "
                                  f"({grade}){target}")
 
+            # If we and the analysts disagree meaningfully, explain WHY.
+            divergence = engine.explain_divergence(verdict, analyst, "1Y")
+            if divergence.diverges:
+                if divergence.direction == "analysts_more_bullish":
+                    title = (f"⚖️ Why the gap? Analysts ({divergence.analyst_label}) "
+                             f"are more bullish than our 1-year view "
+                             f"({divergence.our_label})")
+                    drivers_word = "Holding our score back"
+                else:
+                    title = (f"⚖️ Why the gap? Our 1-year view ({divergence.our_label}) "
+                             f"is more bullish than analysts "
+                             f"({divergence.analyst_label})")
+                    drivers_word = "Lifting our score"
+                with st.expander(title, expanded=True):
+                    st.write(divergence.note)
+                    if divergence.drivers:
+                        st.write(f"**{drivers_word}:**")
+                        for name, measured, weighted in divergence.drivers:
+                            st.write(f"- **{name}** — {measured} ({weighted:+.1f})")
+
         # Link out — per-site analyst scores are often paywalled.
         st.caption(
             f"More detail on [Yahoo Finance]"

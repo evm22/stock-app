@@ -26,6 +26,11 @@ from engine import (
     compute_verdict,
     find_tickers,
     get_analyst_consensus,
+    explain_divergence,
+    Verdict,
+    HorizonVerdict,
+    WeightedSignal,
+    AnalystConsensus,
     VERDICT_LABELS,
     HORIZONS,
     RANGES,
@@ -107,7 +112,8 @@ def expect_history_not_found(symbol, range_key):
 
 
 # Keys every company / technicals result must expose (values may be n/a).
-COMPANY_KEYS = ["market_cap", "pe", "forward_pe", "eps", "revenue",
+COMPANY_KEYS = ["market_cap", "pe", "forward_pe", "peg", "eps", "revenue",
+                "earnings_growth", "revenue_growth",
                 "profit_margin", "dividend_yield", "debt_to_equity",
                 "free_cash_flow", "next_earnings", "sector", "industry"]
 TECH_KEYS = ["week52_high", "week52_low", "ma50", "ma200", "rsi",
@@ -347,6 +353,48 @@ def expect_analyst_not_found(symbol):
     assert not a.found, f"{symbol}: expected not-found"
 
 
+def expect_growth_aware_verdict(symbol):
+    """A growth stock should get a 'growth' signal, and (when PEG exists) a
+    growth-adjusted PEG valuation rather than a raw-P/E penalty."""
+    verdict = compute_verdict(symbol)
+    assert verdict.found, f"{symbol}: verdict not found"
+    keys = {s.key for s in verdict.signals}
+    assert "growth" in keys, f"{symbol}: expected a growth signal, got {sorted(keys)}"
+    valuation = next((s for s in verdict.signals if s.key == "pe"), None)
+    assert valuation is not None, f"{symbol}: expected a valuation signal"
+    print(f"      {symbol}: valuation -> {valuation.measured} ({valuation.points:+d}); "
+          f"1Y {verdict.horizons['1Y'].label}")
+
+
+def expect_divergence_explained():
+    """Synthetic (no network): our Hold vs analysts' Strong Buy must produce a
+    'analysts more bullish' explanation that names the signals dragging us down;
+    an equal pair must produce no divergence."""
+    breakdown = [
+        WeightedSignal("pe", "Valuation (P/E)", "P/E 60 (expensive)", -1, 1.0, -1.0),
+        WeightedSignal("growth", "Growth", "earnings 80% (rapid)", 2, 1.5, 3.0),
+        WeightedSignal("macd", "Momentum (MACD)", "bearish", -1, 1.0, -1.0),
+    ]
+    hv = HorizonVerdict("1Y", label="Hold", score=52.0, enough_data=True,
+                        breakdown=breakdown)
+    verdict = Verdict(True, "TEST", horizons={"1Y": hv}, signals=[])
+
+    bullish = AnalystConsensus(True, "TEST", has_coverage=True, label="Strong Buy",
+                               mean=1.3)
+    d = explain_divergence(verdict, bullish, "1Y")
+    assert d.diverges, "expected a divergence"
+    assert d.direction == "analysts_more_bullish", d.direction
+    assert d.drivers, "expected drivers explaining the gap"
+    assert all(weighted < 0 for (_, _, weighted) in d.drivers), \
+        f"drivers should be the negative signals, got {d.drivers}"
+
+    aligned = AnalystConsensus(True, "TEST", has_coverage=True, label="Hold", mean=3.0)
+    assert not explain_divergence(verdict, aligned, "1Y").diverges, \
+        "equal labels should not diverge"
+    print(f"      divergence: {d.our_label} vs {d.analyst_label} -> {d.direction}, "
+          f"drivers={[n for n, _, _ in d.drivers]}")
+
+
 def expect_unconfirmed_move_logic():
     """Synthetic check (no network): a strong recent GAIN on BELOW-average
     volume must be flagged 'unconfirmed' — the basis for the -2 verdict rule."""
@@ -434,6 +482,12 @@ def main():
                          lambda: expect_analyst_no_coverage("AVIV.TA")))
     results.append(check(f"{INVALID_TICKER} analyst consensus not found",
                          lambda: expect_analyst_not_found(INVALID_TICKER)))
+
+    # Engine refinement: growth-aware verdict + divergence explanation.
+    results.append(check("AVGO verdict is growth-aware (PEG + growth signal)",
+                         lambda: expect_growth_aware_verdict("AVGO")))
+    results.append(check("divergence is explained (synthetic)",
+                         lambda: expect_divergence_explained()))
 
     passed = sum(results)
     total = len(results)

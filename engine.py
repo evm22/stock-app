@@ -508,12 +508,21 @@ def get_company_metrics(ticker: str) -> MetricGroup:
     except Exception:
         next_earnings = None
 
+    # PEG = P/E relative to growth (a value below ~1 is cheap FOR its growth).
+    peg = info.get("trailingPegRatio")
+    if not _is_number(peg):
+        peg = info.get("pegRatio")
+
     metrics = {
         "market_cap":     _metric("Market cap", market_cap, "large_money", "info/fast_info.marketCap"),
         "pe":             _metric("P/E (trailing)", info.get("trailingPE"), "ratio", "info.trailingPE"),
         "forward_pe":     _metric("Forward P/E", info.get("forwardPE"), "ratio", "info.forwardPE"),
+        "peg":            _metric("PEG ratio", peg, "ratio", "info.trailingPegRatio"),
         "eps":            _metric("EPS (trailing)", info.get("trailingEps"), "money", "info.trailingEps"),
         "revenue":        _metric("Revenue (ttm)", info.get("totalRevenue"), "large_money", "info.totalRevenue"),
+        # Year-over-year growth — fractions (0.48 = 48%) -> percent_frac.
+        "earnings_growth": _metric("Earnings growth (yoy)", info.get("earningsGrowth"), "percent_frac", "info.earningsGrowth"),
+        "revenue_growth":  _metric("Revenue growth (yoy)", info.get("revenueGrowth"), "percent_frac", "info.revenueGrowth"),
         # profitMargins is a FRACTION (0.27 = 27%) -> percent_frac multiplies by 100.
         "profit_margin":  _metric("Profit margin", info.get("profitMargins"), "percent_frac", "info.profitMargins"),
         # dividendYield is ALREADY a percent (0.36 = 0.36%) -> percent shows as-is.
@@ -860,6 +869,7 @@ HORIZON_WEIGHTS = {
         "rsi": 2.0, "macd": 2.0, "bollinger": 2.0, "ma50": 2.0,
         "range52": 1.5, "ma_cross": 1.5, "ma200": 1.0,
         "pe": 0.5, "fwd_pe": 0.5, "margin": 0.5, "d2e": 0.5, "fcf": 0.5,
+        "growth": 0.5,  # growth barely moves a 6-month view
         # Volume signals matter MOST short-term: a move not backed by volume
         # is fragile, and accumulation/distribution shows near-term pressure.
         "vol_confirm": 2.0, "obv": 1.5, "ad": 1.5,
@@ -868,11 +878,13 @@ HORIZON_WEIGHTS = {
         "rsi": 1.0, "macd": 1.0, "bollinger": 1.0, "ma50": 1.0,
         "range52": 1.0, "ma_cross": 1.0, "ma200": 1.0,
         "pe": 1.0, "fwd_pe": 1.0, "margin": 1.0, "d2e": 1.0, "fcf": 1.0,
+        "growth": 1.5,  # growth is a key medium-term driver
         "vol_confirm": 1.0, "obv": 1.0, "ad": 1.0,
     },
     "5Y": {
         "pe": 2.0, "margin": 2.0, "fcf": 2.0, "d2e": 1.5, "fwd_pe": 1.5,
         "ma200": 1.5, "ma_cross": 1.0, "range52": 0.5,
+        "growth": 2.0,  # over five years, growth dominates
         "rsi": 0.3, "macd": 0.3, "bollinger": 0.3, "ma50": 0.3,
         # Over five years, short-term volume noise barely matters.
         "vol_confirm": 0.3, "obv": 0.3, "ad": 0.5,
@@ -1017,6 +1029,9 @@ def compute_verdict(ticker: str) -> Verdict:
     price = quote.price if quote.found else None
     pe = value_of(company, "pe")
     forward_pe = value_of(company, "forward_pe")
+    peg = value_of(company, "peg")
+    earnings_growth = value_of(company, "earnings_growth")
+    revenue_growth = value_of(company, "revenue_growth")
     margin = value_of(company, "profit_margin")
     debt_to_equity = value_of(company, "debt_to_equity")
     free_cash_flow = value_of(company, "free_cash_flow")
@@ -1039,8 +1054,20 @@ def compute_verdict(ticker: str) -> Verdict:
     def add(key, name, measured, points):
         signals.append(Signal(key, name, measured, points))
 
-    # 1) Valuation — trailing P/E vs reasonable bands.
-    if _is_number(pe):
+    # 1) Valuation — GROWTH-ADJUSTED. Prefer PEG (P/E relative to growth): a high
+    #    P/E backed by fast growth isn't truly expensive. PEG < ~1 is cheap for
+    #    the growth; > ~2.5 is pricey even allowing for growth. Without a PEG we
+    #    fall back to plain trailing-P/E bands.
+    if _is_number(peg) and peg > 0:
+        if peg <= 1.0:
+            add("pe", "Valuation (PEG)", f"PEG = {peg:.2f} (cheap for its growth)", +2)
+        elif peg <= 1.5:
+            add("pe", "Valuation (PEG)", f"PEG = {peg:.2f} (fair for its growth)", +1)
+        elif peg <= 2.5:
+            add("pe", "Valuation (PEG)", f"PEG = {peg:.2f} (full)", 0)
+        else:
+            add("pe", "Valuation (PEG)", f"PEG = {peg:.2f} (expensive even for growth)", -1)
+    elif _is_number(pe):
         if pe <= 0:
             add("pe", "Valuation (P/E)", f"P/E = {pe:.1f} (no positive earnings)", -1)
         elif pe <= 15:
@@ -1051,6 +1078,21 @@ def compute_verdict(ticker: str) -> Verdict:
             add("pe", "Valuation (P/E)", f"P/E = {pe:.1f} (full)", 0)
         else:
             add("pe", "Valuation (P/E)", f"P/E = {pe:.1f} (expensive)", -1)
+
+    # 1b) Growth — the business expanding? (analysts weigh this heavily; our old
+    #     model ignored it entirely). Prefer earnings growth, else revenue growth.
+    growth_value = earnings_growth if _is_number(earnings_growth) else revenue_growth
+    growth_label = "earnings" if _is_number(earnings_growth) else "revenue"
+    if _is_number(growth_value):
+        pct = growth_value * 100
+        if growth_value <= 0:
+            add("growth", "Growth", f"{growth_label} growth {pct:.0f}% (shrinking)", -1)
+        elif growth_value < 0.10:
+            add("growth", "Growth", f"{growth_label} growth {pct:.0f}% (modest)", 0)
+        elif growth_value < 0.25:
+            add("growth", "Growth", f"{growth_label} growth {pct:.0f}% (solid)", +1)
+        else:
+            add("growth", "Growth", f"{growth_label} growth {pct:.0f}% (rapid)", +2)
 
     # 2) Earnings outlook — forward P/E lower than trailing means earnings are
     #    expected to grow (cheaper on next year's profits).
@@ -1332,3 +1374,72 @@ def get_analyst_consensus(ticker: str) -> AnalystConsensus:
 def humanize_action(action_code):
     """Public helper for the UI: 'up' -> 'upgraded', etc."""
     return _ACTION_WORDS.get(action_code, action_code or "rated")
+
+
+# --- Explain a divergence between our verdict and the analysts ------------
+
+# Put every label on a simple 0..3 bullishness ladder so we can compare ours
+# (Sell/Hold/Buy/Strong Buy) with the analysts' (which may also be Underperform).
+_RANK = {"Strong Sell": 0, "Sell": 0, "Underperform": 0,
+         "Hold": 1, "Buy": 2, "Strong Buy": 3}
+
+
+@dataclass
+class Divergence:
+    """
+    Why our verdict and the analyst consensus differ (when they do).
+
+    - diverges  : True if they differ by at least one rung on the ladder.
+    - direction : "analysts_more_bullish" / "we_more_bullish" / "aligned".
+    - drivers   : the signals most responsible for the gap, as
+                  (name, measured, weighted) tuples.
+    - note      : a plain-language explanation.
+    """
+    diverges: bool
+    direction: str
+    our_label: str
+    analyst_label: str
+    gap: int
+    drivers: list
+    note: str
+
+
+def explain_divergence(verdict, analyst, horizon: str = "1Y") -> Divergence:
+    """
+    Compare our `horizon` verdict with the analyst consensus and, if they differ
+    meaningfully, explain why — naming the signals that drive the gap. We compare
+    against the 1-year horizon by default, since analyst targets are ~12 months.
+    """
+    if (verdict is None or not verdict.found
+            or analyst is None or not analyst.found or not analyst.has_coverage):
+        return Divergence(False, "aligned", "", "", 0, [], "")
+
+    hv = verdict.horizons.get(horizon)
+    if hv is None or not hv.enough_data:
+        return Divergence(False, "aligned", "", analyst.label, 0, [], "")
+
+    our_label, analyst_label = hv.label, analyst.label
+    gap = _RANK.get(analyst_label, 1) - _RANK.get(our_label, 1)
+
+    if gap >= 1:
+        # Analysts more bullish -> what's holding OUR score down (most negative).
+        drivers = sorted((w for w in hv.breakdown if w.weight > 0 and w.weighted < 0),
+                         key=lambda w: w.weighted)[:3]
+        note = ("Analysts are more bullish than our model. Our score is rule-based "
+                "on today's numbers and is held back by the items below. Analysts "
+                "usually look further ahead and weigh forward earnings growth, "
+                "12-month price targets, and qualitative factors our rules don't "
+                "capture.")
+    elif gap <= -1:
+        # We're more bullish -> what's lifting OUR score (most positive).
+        drivers = sorted((w for w in hv.breakdown if w.weight > 0 and w.weighted > 0),
+                         key=lambda w: w.weighted, reverse=True)[:3]
+        note = ("Our model is more bullish than analysts. It rewards the strengths "
+                "below; analysts may be more cautious on valuation, near-term risks, "
+                "or information beyond public price/fundamentals data.")
+    else:
+        return Divergence(False, "aligned", our_label, analyst_label, 0, [], "")
+
+    driver_list = [(w.name, w.measured, w.weighted) for w in drivers]
+    return Divergence(True, ("analysts_more_bullish" if gap >= 1 else "we_more_bullish"),
+                      our_label, analyst_label, gap, driver_list, note)
