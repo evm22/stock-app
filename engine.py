@@ -1468,8 +1468,65 @@ def explain_divergence(verdict, analyst, horizon: str = "1Y") -> Divergence:
                 "below; analysts may be more cautious on valuation, near-term risks, "
                 "or information beyond public price/fundamentals data.")
     else:
-        return Divergence(False, "aligned", our_label, analyst_label, 0, [], "")
+        # Same rung -> aligned. Still return a (positive) note so the UI is
+        # never mysteriously empty.
+        return Divergence(
+            False, "aligned", our_label, analyst_label, 0, [],
+            f"Our 1-year verdict ({our_label}) is in line with the analyst "
+            f"consensus ({analyst_label}).")
 
     driver_list = [(w.name, w.measured, w.weighted) for w in drivers]
     return Divergence(True, ("analysts_more_bullish" if gap >= 1 else "we_more_bullish"),
                       our_label, analyst_label, gap, driver_list, note)
+
+
+# --- Plain-language help tooltips (one place, easy to edit) ----------------
+# Keyed by the metric key used in get_company_metrics / get_stock_technicals
+# (plus a couple of UI items). Each is a short, beginner-friendly one-liner the
+# UI shows as a "?" tooltip next to the metric.
+HELP_TEXTS = {
+    # --- Company fundamentals ---
+    "market_cap": "The total market value of the company (share price times the number of shares).",
+    "pe": "Price-to-Earnings: share price divided by yearly earnings per share. High can mean expensive or high growth expectations.",
+    "forward_pe": "Like P/E but using analysts' forecast of NEXT year's earnings. Lower than the trailing P/E hints earnings should grow.",
+    "peg": "P/E divided by the earnings growth rate. Below about 1 suggests the stock is cheap relative to how fast it's growing.",
+    "eps": "Earnings Per Share: the company's yearly profit divided by its number of shares.",
+    "revenue": "Total sales (the 'top line') over the last twelve months.",
+    "earnings_growth": "How much profit grew compared with a year ago.",
+    "revenue_growth": "How much sales grew compared with a year ago.",
+    "profit_margin": "The share of revenue kept as profit after all costs. Higher means more profitable.",
+    "dividend_yield": "Yearly dividend as a percent of the share price - the cash income from holding the stock.",
+    "debt_to_equity": "How much debt the company has versus shareholders' equity. Higher means more borrowing (more risk).",
+    "free_cash_flow": "Cash left after running and investing in the business - money it can return or reinvest.",
+    "next_earnings": "The date of the company's next quarterly earnings report.",
+    "sector": "The broad part of the economy the company operates in.",
+    "industry": "The specific business area within its sector.",
+    # --- Price levels, trend & momentum ---
+    "week52_high": "The highest price the stock reached in the past year.",
+    "week52_low": "The lowest price the stock reached in the past year.",
+    "ma50": "The average closing price over the last 50 trading days - a short-to-medium-term trend line.",
+    "ma200": "The average closing price over the last 200 trading days - a long-term trend line.",
+    "rsi": "Relative Strength Index (0-100). Above 70 is 'overbought' (may pause); below 30 is 'oversold' (may bounce).",
+    "beta": "How much the stock moves versus the market. 1 = moves with the market; above 1 = more volatile.",
+    "macd": "MACD line: the gap between the 12-day and 26-day average prices. Positive means short-term momentum is upward.",
+    "macd_signal": "A 9-day smoothed version of the MACD line, used as a trigger for crossovers.",
+    "macd_hist": "MACD line minus its signal line. Rising bars suggest strengthening momentum.",
+    "macd_state": "'Bullish' when the MACD line is above its signal line; 'bearish' when below.",
+    "bb_upper": "Bollinger upper band: about 2 standard deviations above the 20-day average - a 'stretched high' zone.",
+    "bb_middle": "Bollinger middle band: the 20-day average price.",
+    "bb_lower": "Bollinger lower band: about 2 standard deviations below the 20-day average - a 'stretched low' zone.",
+    "bb_state": "Where today's price sits versus the bands: near the upper, near the lower, or within them.",
+    # --- Volume & buy/sell pressure (estimates) ---
+    "avg_volume": "The typical number of shares traded per day.",
+    "vol_recent": "Average daily trading volume over the last 5 days.",
+    "vol_avg": "Average daily trading volume over the last 50 days, used as the baseline.",
+    "vol_move": "The stock's percent price change over the last 5 days.",
+    "vol_confirm": "Whether a recent notable price move was backed by above-average volume ('confirmed') or not ('unconfirmed').",
+    "obv_value": "On-Balance Volume: adds volume on up-days and subtracts it on down-days - an ESTIMATE of buying vs selling pressure.",
+    "obv_trend": "Whether OBV has been rising (buying pressure) or falling (selling pressure) recently.",
+    "ad_value": "Accumulation/Distribution: estimates buying vs selling pressure from where each day closes in its range, times volume.",
+    "ad_trend": "Whether the A/D line has been rising (accumulation) or falling (distribution) recently.",
+    # --- UI items ---
+    "verdict_score": "Our rule-based score from 0 to 100, where 50 is neutral. Higher is more bullish. It's an automated opinion, not advice.",
+    "analyst_mean": "The average analyst rating on a 1-to-5 scale, where 1 = Strong Buy and 5 = Sell.",
+}

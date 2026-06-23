@@ -130,14 +130,30 @@ def format_metric(metric, currency):
     return str(value)
 
 
-def render_metrics(group, columns_per_row=3):
-    """Show a MetricGroup as a tidy grid of st.metric tiles (n/a when missing)."""
-    items = list(group.metrics.values())
+# Stock-analysis tiles are split into two readable groups.
+PRICE_TREND_KEYS = ["week52_high", "week52_low", "ma50", "ma200", "rsi", "beta",
+                    "macd", "macd_signal", "macd_hist", "macd_state",
+                    "bb_upper", "bb_middle", "bb_lower", "bb_state"]
+PRESSURE_KEYS = ["avg_volume", "vol_recent", "vol_avg", "vol_move", "vol_confirm",
+                 "obv_value", "obv_trend", "ad_value", "ad_trend"]
+
+
+def render_metrics(group, keys=None, columns_per_row=3):
+    """
+    Show a MetricGroup as a tidy grid of st.metric tiles (n/a when missing),
+    each with a plain-language "?" help tooltip. Pass `keys` to render only a
+    subset (and in that order), e.g. to split a section into sub-groups.
+    """
+    if keys is None:
+        items = list(group.metrics.items())
+    else:
+        items = [(k, group.metrics[k]) for k in keys if k in group.metrics]
     for start in range(0, len(items), columns_per_row):
         row = items[start:start + columns_per_row]
         columns = st.columns(columns_per_row)
-        for column, metric in zip(columns, row):
-            column.metric(metric.label, format_metric(metric, group.currency))
+        for column, (key, metric) in zip(columns, row):
+            column.metric(metric.label, format_metric(metric, group.currency),
+                          help=engine.HELP_TEXTS.get(key))
 
 
 def make_candlestick(df):
@@ -390,7 +406,7 @@ if symbol:
 
         # --- Verdict (rule-based, three time horizons) ------------------
         st.divider()
-        st.markdown("### Verdict")
+        st.subheader("Verdict")
         try:
             verdict = load_verdict(symbol)
         except Exception:
@@ -409,7 +425,10 @@ if symbol:
                     continue
                 color = VERDICT_COLORS.get(hv.label, "gray")
                 column.markdown(f":{color}[**{hv.label}**]")
-                column.markdown(f"score **{hv.score:.0f}**/100")
+                # Score as a metric so it carries a "?" tooltip.
+                column.metric("Score", f"{hv.score:.0f}/100",
+                              help=engine.HELP_TEXTS.get("verdict_score"),
+                              label_visibility="collapsed")
                 column.progress(int(round(hv.score)))
 
             st.caption(
@@ -442,7 +461,7 @@ if symbol:
 
         # --- Our verdict vs analyst consensus (Step 5) ------------------
         st.divider()
-        st.markdown("### Our verdict vs Wall Street")
+        st.subheader("Our verdict vs Wall Street")
         try:
             analyst = load_analyst(symbol)
         except Exception:
@@ -459,7 +478,10 @@ if symbol:
                       if verdict is not None and verdict.found else None)
                 if hv is not None and hv.enough_data:
                     c = VERDICT_COLORS.get(hv.label, "gray")
-                    st.markdown(f":{c}[**{hv.label}**] · {hv.score:.0f}/100")
+                    st.markdown(f":{c}[**{hv.label}**]")
+                    st.metric("Score", f"{hv.score:.0f}/100",
+                              help=engine.HELP_TEXTS.get("verdict_score"),
+                              label_visibility="collapsed")
                 else:
                     st.markdown("n/a")
                 st.caption("rule-based, from price + fundamentals")
@@ -468,8 +490,10 @@ if symbol:
                 c = ANALYST_COLORS.get(analyst.label, "gray")
                 st.markdown(f":{c}[**{analyst.label}**]")
                 if analyst.mean is not None:
-                    st.caption(f"mean rating {analyst.mean:.2f}/5 from "
-                               f"{analyst.num_analysts or '?'} analysts")
+                    st.metric("Mean rating", f"{analyst.mean:.2f}/5",
+                              help=engine.HELP_TEXTS.get("analyst_mean"),
+                              label_visibility="collapsed")
+                    st.caption(f"from {analyst.num_analysts or '?'} analysts")
 
             # Mean price target vs current price (implied upside / downside).
             if analyst.target_mean and analyst.current_price:
@@ -499,9 +523,13 @@ if symbol:
                         st.write(f"- **{a['date']}** {a['firm']}: {verb} "
                                  f"({grade}){target}")
 
-            # If we and the analysts disagree meaningfully, explain WHY.
+            # ALWAYS say something about how we compare to the analysts.
             divergence = engine.explain_divergence(verdict, analyst, "1Y")
-            if divergence.diverges:
+            if not divergence.diverges:
+                # Agreement -> a short positive note (never an empty section).
+                st.success("✅ " + (divergence.note or
+                           "Our verdict is in line with the analyst consensus."))
+            else:
                 if divergence.direction == "analysts_more_bullish":
                     title = (f"⚖️ Why the gap? Analysts ({divergence.analyst_label}) "
                              f"are more bullish than our 1-year view "
@@ -528,7 +556,7 @@ if symbol:
 
         # --- Price history chart ----------------------------------------
         st.divider()
-        st.markdown("### Price history")
+        st.subheader("Price history")
 
         # Range selector as a row of buttons (segmented control). The keys come
         # straight from the engine so the two never drift apart. Default = 1M.
@@ -565,22 +593,22 @@ if symbol:
             # Empty range (common for 1D/1W intraday on the free tier).
             st.info(f"No chart data for {range_key}: {history.reason}")
         else:
-            # --- Price chart (line or candlestick) ---
-            if chart_type == "Line":
+            if as_percent:
+                # % view: a normalised line (start of range = 0%). This is the
+                # percent representation for BOTH chart types, so the toggle
+                # always does something.
                 closes = history.data.set_index("Date")["Close"]
-                if as_percent:
-                    # Each point as % difference from the first close of the range.
-                    pct = (closes / closes.iloc[0] - 1) * 100
-                    pct.name = "% change"
-                    st.line_chart(pct)
-                else:
-                    # Built-in line chart: closing price over time.
-                    st.line_chart(closes)
+                pct = (closes / closes.iloc[0] - 1) * 100
+                pct.name = "% change"
+                st.line_chart(pct)
+                if chart_type == "Candlestick":
+                    st.caption("ℹ️ % view uses the line representation (percent "
+                               "change from the start of the range).")
+            elif chart_type == "Line":
+                # Built-in line chart: closing price over time.
+                st.line_chart(history.data.set_index("Date")["Close"])
             else:
-                # Candlestick always shows price (open/high/low/close).
-                if as_percent:
-                    st.caption("ℹ️ % view applies to the line chart; "
-                               "candlestick stays in price.")
+                # Candlestick (open/high/low/close) in price terms.
                 st.altair_chart(make_candlestick(history.data), width="stretch")
 
             # --- Subtle volume sub-panel ---
@@ -594,8 +622,9 @@ if symbol:
 
         # --- Company analysis (the business) ----------------------------
         st.divider()
-        st.markdown("## Company analysis")
-        st.caption("The business behind the stock.")
+        st.subheader("Company analysis")
+        st.caption("The business behind the stock. Hover the **?** on any tile "
+                   "for a plain-language explanation.")
         try:
             company = load_company(symbol)
         except Exception:
@@ -607,18 +636,25 @@ if symbol:
 
         # --- Stock analysis (the share-price behaviour) -----------------
         st.divider()
-        st.markdown("## Stock analysis")
+        st.subheader("Stock analysis")
         st.caption("How the share price itself has been behaving.")
         try:
             technicals = load_technicals(symbol)
         except Exception:
             technicals = None
         if technicals is not None and technicals.found and technicals.metrics:
-            render_metrics(technicals)
+            # Group 1: price levels, trend & momentum.
+            st.markdown("**Price levels, trend & momentum**")
+            render_metrics(technicals, keys=PRICE_TREND_KEYS)
+            # Group 2: volume & buy/sell pressure (kept together and labelled so
+            # the OBV / A-D / volume-confirmation tiles are easy to find).
+            st.markdown("**Volume & buy/sell pressure (estimates)**")
+            render_metrics(technicals, keys=PRESSURE_KEYS)
             st.caption(
-                "Note: **OBV** and **Accum/Dist** are *estimates* of buying/"
-                "selling pressure derived from price + volume — not true "
-                "order-flow data (which isn't available for free)."
+                "Note: free data doesn't separate buy-volume from sell-volume, "
+                "so **OBV** and **Accumulation/Distribution** are *estimates* of "
+                "buying/selling pressure derived from price + volume — not true "
+                "order-flow data."
             )
         else:
             st.info("No stock metrics available for this ticker.")

@@ -37,6 +37,7 @@ from engine import (
     VERDICT_LABELS,
     HORIZONS,
     RANGES,
+    HELP_TEXTS,
     _volume_confirmation,
 )
 
@@ -410,10 +411,21 @@ def expect_divergence_explained():
         f"drivers should be the negative signals, got {d.drivers}"
 
     aligned = AnalystConsensus(True, "TEST", has_coverage=True, label="Hold", mean=3.0)
-    assert not explain_divergence(verdict, aligned, "1Y").diverges, \
-        "equal labels should not diverge"
+    aligned_result = explain_divergence(verdict, aligned, "1Y")
+    assert not aligned_result.diverges, "equal labels should not diverge"
+    # Even when aligned, there must be a (positive) note so the UI isn't empty.
+    assert aligned_result.note, "aligned case should still carry a note"
     print(f"      divergence: {d.our_label} vs {d.analyst_label} -> {d.direction}, "
-          f"drivers={[n for n, _, _ in d.drivers]}")
+          f"drivers={[n for n, _, _ in d.drivers]}; aligned note OK")
+
+
+def expect_help_texts_cover_all_metrics():
+    """Every Company/Stock metric key (plus the verdict score and analyst mean)
+    must have a non-empty help tooltip."""
+    needed = COMPANY_KEYS + TECH_KEYS + ["verdict_score", "analyst_mean"]
+    missing = [k for k in needed if not HELP_TEXTS.get(k)]
+    assert not missing, f"missing help text for: {missing}"
+    print(f"      help texts cover all {len(needed)} metrics/items")
 
 
 def expect_unconfirmed_move_logic():
@@ -509,6 +521,8 @@ def main():
                          lambda: expect_growth_aware_verdict("AVGO")))
     results.append(check("divergence is explained (synthetic)",
                          lambda: expect_divergence_explained()))
+    results.append(check("help tooltips cover every metric",
+                         lambda: expect_help_texts_cover_all_metrics()))
 
     # Step 6: pure watchlist list helpers.
     results.append(check("watchlist add/remove/dedupe logic",
