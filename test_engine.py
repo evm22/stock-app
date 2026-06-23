@@ -41,6 +41,14 @@ from engine import (
     RANGES,
     HELP_TEXTS,
     _volume_confirmation,
+    _rsi,
+    _ema,
+    _macd,
+    _bollinger,
+    _obv,
+    _accum_dist,
+    _trend_state,
+    _label_for_score,
 )
 
 # Well-known tickers we expect to resolve to a real company + positive price.
@@ -483,6 +491,76 @@ def expect_pct_change_mapping():
     print(f"      % mapping: start={base:.0f} -> 0%, series {list(pct)}")
 
 
+def expect_indicator_math():
+    """Synthetic (no network): the pure technical indicators on hand-made series
+    with known answers, so the math is pinned down without relying on live data."""
+    # _ema: a flat series stays flat; a rising series lags below the latest price.
+    flat = pd.Series([5.0] * 30)
+    assert abs(_ema(flat, 12).iloc[-1] - 5.0) < 1e-9, "EMA of a flat series = the value"
+    rising = pd.Series([float(i) for i in range(1, 31)])
+    assert _ema(rising, 12).iloc[-1] < rising.iloc[-1], "EMA should lag a rising series"
+
+    # _rsi: strictly up -> 100 (no down days); strictly down -> 0 (no up days).
+    up = pd.Series([float(i) for i in range(1, 21)])
+    down = pd.Series([float(i) for i in range(20, 0, -1)])
+    assert abs(_rsi(up) - 100.0) < 1e-9, f"all-up RSI should be 100, got {_rsi(up)}"
+    assert abs(_rsi(down) - 0.0) < 1e-9, f"all-down RSI should be 0, got {_rsi(down)}"
+    assert _rsi(pd.Series([1.0, 2.0])) is None, "too-short RSI must be None"
+
+    # _macd: histogram is exactly macd - signal; a flat series gives all zeros.
+    series = pd.Series([float(i) for i in range(1, 51)])
+    m, s, h = _macd(series)
+    assert abs(h - (m - s)) < 1e-9, "MACD histogram must equal macd - signal"
+    fm, fs, fh = _macd(pd.Series([7.0] * 50))
+    assert max(abs(fm), abs(fs), abs(fh)) < 1e-9, "flat series -> MACD all zero"
+    assert _macd(pd.Series([1.0, 2.0])) == (None, None, None), "too-short -> Nones"
+
+    # _bollinger: middle is the SMA, bands are symmetric, upper > middle > lower.
+    closes20 = pd.Series([float(i) for i in range(1, 21)])  # mean 10.5
+    upper, middle, lower = _bollinger(closes20, period=20, num_std=2.0)
+    assert abs(middle - 10.5) < 1e-9, f"Bollinger middle should be 10.5, got {middle}"
+    assert upper > middle > lower, "Bollinger order upper > middle > lower"
+    assert abs((upper - middle) - (middle - lower)) < 1e-9, "bands must be symmetric"
+
+    # _obv: +volume on up-closes, -volume on down-closes, 0 on unchanged.
+    obv = _obv(pd.Series([10.0, 11.0, 10.0, 10.0, 12.0]),
+               pd.Series([100.0, 200.0, 300.0, 400.0, 500.0]))
+    assert list(obv) == [0.0, 200.0, -100.0, -100.0, 400.0], f"OBV wrong: {list(obv)}"
+
+    # _accum_dist: a close at the high adds +volume; a close at the low adds -volume.
+    ad = _accum_dist(pd.DataFrame({
+        "High": [10.0, 10.0], "Low": [8.0, 8.0],
+        "Close": [10.0, 8.0], "Volume": [100.0, 200.0],
+    }))
+    assert ad.iloc[0] == 100.0 and ad.iloc[-1] == -100.0, f"A/D wrong: {list(ad)}"
+
+    # _trend_state: rising / falling / flat vs `lookback` bars ago.
+    assert _trend_state(pd.Series([float(i) for i in range(25)])) == "rising"
+    assert _trend_state(pd.Series([float(i) for i in range(25, 0, -1)])) == "falling"
+    assert _trend_state(pd.Series([3.0] * 25)) == "flat"
+    assert _trend_state(pd.Series([1.0, 2.0])) is None, "too-short -> None"
+
+    print("      indicators: EMA/RSI/MACD/Bollinger/OBV/A-D/trend math OK")
+
+
+def expect_verdict_label_bands():
+    """Synthetic (no network): the 0..100 score -> label bands, exactly at their
+    boundaries (<35 Sell, <55 Hold, <75 Buy, else Strong Buy)."""
+    cases = [
+        (0, "Sell"), (34.999, "Sell"),
+        (35, "Hold"), (54.999, "Hold"),
+        (55, "Buy"), (74.999, "Buy"),
+        (75, "Strong Buy"), (100, "Strong Buy"),
+    ]
+    for score, expected in cases:
+        got = _label_for_score(score)
+        assert got == expected, f"score {score} -> {got!r}, expected {expected!r}"
+    # The bands must use the canonical label vocabulary, in order.
+    assert [_label_for_score(s) for s in (10, 45, 65, 90)] == VERDICT_LABELS, \
+        "label bands should map onto VERDICT_LABELS in order"
+    print(f"      verdict bands: {[ (c[0], c[1]) for c in cases ]}")
+
+
 def main():
     print("Running engine tests against live Yahoo Finance data...\n")
 
@@ -571,6 +649,12 @@ def main():
     # candlestick's linked right-hand % axis.
     results.append(check("percent-change mapping (start bar = 0%)",
                          lambda: expect_pct_change_mapping()))
+
+    # Pure indicator + verdict-band math (no network), with known answers.
+    results.append(check("technical indicator math (synthetic)",
+                         lambda: expect_indicator_math()))
+    results.append(check("verdict score -> label bands",
+                         lambda: expect_verdict_label_bands()))
 
     passed = sum(results)
     total = len(results)
