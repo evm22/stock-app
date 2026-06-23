@@ -23,6 +23,7 @@ from engine import (
     get_stock_technicals,
     compute_verdict,
     VERDICT_LABELS,
+    HORIZONS,
     RANGES,
 )
 
@@ -105,7 +106,9 @@ COMPANY_KEYS = ["market_cap", "pe", "forward_pe", "eps", "revenue",
                 "profit_margin", "dividend_yield", "debt_to_equity",
                 "free_cash_flow", "next_earnings", "sector", "industry"]
 TECH_KEYS = ["week52_high", "week52_low", "ma50", "ma200", "rsi",
-             "beta", "avg_volume"]
+             "beta", "avg_volume",
+             "macd", "macd_signal", "macd_hist", "macd_state",
+             "bb_upper", "bb_middle", "bb_lower", "bb_state"]
 
 
 def expect_company_metrics(symbol):
@@ -139,6 +142,24 @@ def expect_stock_technicals(symbol):
     if rsi.available:
         assert 0 <= rsi.value <= 100, f"RSI must be 0..100, got {rsi.value!r}"
 
+    # Bollinger: upper must exceed lower, middle must sit between them.
+    bb_upper = group.metrics["bb_upper"]
+    bb_lower = group.metrics["bb_lower"]
+    bb_middle = group.metrics["bb_middle"]
+    if bb_upper.available and bb_lower.available:
+        assert bb_upper.value > bb_lower.value, "Bollinger upper must exceed lower"
+        if bb_middle.available:
+            assert bb_lower.value <= bb_middle.value <= bb_upper.value, \
+                "Bollinger middle must sit between the bands"
+
+    # MACD histogram must equal macd line minus signal line.
+    macd = group.metrics["macd"]
+    macd_signal = group.metrics["macd_signal"]
+    macd_hist = group.metrics["macd_hist"]
+    if macd.available and macd_signal.available and macd_hist.available:
+        assert abs(macd_hist.value - (macd.value - macd_signal.value)) < 1e-6, \
+            "MACD histogram must equal macd - signal"
+
     available = sum(1 for k in TECH_KEYS if group.metrics[k].available)
     print(f"      {symbol} technicals: {available}/{len(TECH_KEYS)} fields available")
 
@@ -151,39 +172,73 @@ def expect_metrics_not_found(symbol):
     assert not technicals.found, f"expected technicals not-found for {symbol}"
 
 
+def _weight_of(horizon_verdict, key):
+    """Find the weight a horizon applied to a given signal key (or None)."""
+    for ws in horizon_verdict.breakdown:
+        if ws.key == key:
+            return ws.weight
+    return None
+
+
 def expect_verdict(symbol):
-    """A real ticker should produce a valid label, in-range score, and a
-    breakdown whose total points are consistent with the score."""
+    """A real ticker should produce all three horizons, each with a valid
+    label, in-range score, and a weighted breakdown consistent with the score —
+    and the horizons must re-weight the signals differently."""
     verdict = compute_verdict(symbol)
 
     assert verdict.found, f"expected a verdict result for {symbol}"
-    assert verdict.enough_data, \
-        f"expected enough data for {symbol}: {verdict.reason}"
-    assert verdict.label in VERDICT_LABELS, \
-        f"label {verdict.label!r} not in {VERDICT_LABELS}"
-    assert 0 <= verdict.score <= 100, f"score out of range: {verdict.score}"
-    assert verdict.breakdown, f"expected a non-empty breakdown for {symbol}"
+    assert set(verdict.horizons.keys()) == set(HORIZONS), \
+        f"expected horizons {HORIZONS}, got {list(verdict.horizons)}"
 
-    # The score must agree in direction with the sum of the points:
-    # positive total -> above 50, negative -> below 50, zero -> exactly 50.
-    raw = sum(s.points for s in verdict.breakdown)
-    if raw > 0:
-        assert verdict.score > 50, f"raw {raw} > 0 but score {verdict.score} <= 50"
-    elif raw < 0:
-        assert verdict.score < 50, f"raw {raw} < 0 but score {verdict.score} >= 50"
-    else:
-        assert abs(verdict.score - 50) < 1e-9, \
-            f"raw 0 but score {verdict.score} != 50"
+    scores = {}
+    for horizon in HORIZONS:
+        hv = verdict.horizons[horizon]
+        assert hv.enough_data, f"{symbol} {horizon}: not enough data ({hv.reason})"
+        assert hv.label in VERDICT_LABELS, \
+            f"{symbol} {horizon}: bad label {hv.label!r}"
+        assert 0 <= hv.score <= 100, \
+            f"{symbol} {horizon}: score out of range {hv.score}"
+        assert hv.breakdown, f"{symbol} {horizon}: empty breakdown"
 
-    print(f"      {symbol}: {verdict.label} (score {verdict.score:.0f}/100, "
-          f"{len(verdict.breakdown)} signals, raw {raw:+d})")
+        # Each row's weighted value must equal points * weight.
+        for ws in hv.breakdown:
+            assert abs(ws.weighted - ws.points * ws.weight) < 1e-9, \
+                f"{symbol} {horizon}: weighted != points*weight for {ws.key}"
+
+        # The score direction must match the weighted sum of counted signals.
+        weighted_sum = sum(ws.weighted for ws in hv.breakdown if ws.weight > 0)
+        if weighted_sum > 0:
+            assert hv.score > 50, f"{symbol} {horizon}: wsum>0 but score<=50"
+        elif weighted_sum < 0:
+            assert hv.score < 50, f"{symbol} {horizon}: wsum<0 but score>=50"
+        else:
+            assert abs(hv.score - 50) < 1e-9, \
+                f"{symbol} {horizon}: wsum 0 but score != 50"
+        scores[horizon] = hv.score
+
+    # Horizons must re-weight differently: short-term cares about momentum more,
+    # so RSI must weigh more for 6M than for 5Y. This proves independence.
+    w6 = _weight_of(verdict.horizons["6M"], "rsi")
+    w5 = _weight_of(verdict.horizons["5Y"], "rsi")
+    if w6 is not None and w5 is not None:
+        assert w6 > w5, f"expected RSI weight 6M({w6}) > 5Y({w5})"
+
+    print(f"      {symbol}: "
+          f"6M {verdict.horizons['6M'].label} ({scores['6M']:.0f}) | "
+          f"1Y {verdict.horizons['1Y'].label} ({scores['1Y']:.0f}) | "
+          f"5Y {verdict.horizons['5Y'].label} ({scores['5Y']:.0f})")
 
 
 def expect_verdict_not_usable(symbol):
-    """A fake ticker must come back not-found OR not-enough-data, never a label."""
+    """A fake ticker must be not-found, or have every horizon flagged
+    not-enough-data — never a real label."""
     verdict = compute_verdict(symbol)
-    assert (not verdict.found) or (not verdict.enough_data), \
-        f"expected no usable verdict for {symbol}, got {verdict.label!r}"
+    if not verdict.found:
+        return
+    for horizon in HORIZONS:
+        hv = verdict.horizons.get(horizon)
+        assert hv is not None and not hv.enough_data, \
+            f"expected no usable verdict for {symbol} at {horizon}"
 
 
 def main():

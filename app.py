@@ -64,6 +64,13 @@ VERDICT_COLORS = {
     "Strong Buy": "green",
 }
 
+# Friendly display names for the three verdict horizons.
+HORIZON_NAMES = {
+    "6M": "6-month (short term)",
+    "1Y": "1-year (medium term)",
+    "5Y": "5-year (long term)",
+}
+
 
 def _abbreviate(number):
     """Shorten big numbers for display: 4_362_291_642_368 -> '4.36T'."""
@@ -210,39 +217,57 @@ if symbol:
         exchange = quote.exchange or "unknown exchange"
         st.caption(f"{quote.symbol} · {exchange}")
 
-        # --- Verdict (rule-based, code-only) ----------------------------
+        # --- Verdict (rule-based, three time horizons) ------------------
         st.divider()
+        st.markdown("### Verdict")
         try:
             verdict = load_verdict(symbol)
         except Exception:
             verdict = None
 
-        if verdict is not None and verdict.found and verdict.enough_data:
-            color = VERDICT_COLORS.get(verdict.label, "gray")
-            # Big, colour-coded label + score.
-            st.markdown(
-                f"### Verdict: :{color}[**{verdict.label}**] "
-                f"· score {verdict.score:.0f}/100"
-            )
-            # Visual 0..100 bar (50 = neutral).
-            st.progress(int(round(verdict.score)))
+        if verdict is None or not verdict.found:
+            st.info("No verdict available for this ticker.")
+        else:
+            # Three colour-coded tiles, short -> long horizon.
+            columns = st.columns(len(engine.HORIZONS))
+            for column, horizon in zip(columns, engine.HORIZONS):
+                hv = verdict.horizons.get(horizon)
+                column.markdown(f"**{HORIZON_NAMES.get(horizon, horizon)}**")
+                if hv is None or not hv.enough_data:
+                    column.info("Not enough data")
+                    continue
+                color = VERDICT_COLORS.get(hv.label, "gray")
+                column.markdown(f":{color}[**{hv.label}**]")
+                column.markdown(f"score **{hv.score:.0f}**/100")
+                column.progress(int(round(hv.score)))
+
             st.caption(
                 "⚠️ Automated, rule-based opinion from public data — "
-                "**not financial advice.**"
+                "**not financial advice.** The three horizons re-weight the "
+                "**same current data** differently; they do **not** predict the future."
             )
-            # Full transparency: every rule, what it saw, and its points.
+
+            # Transparent per-horizon breakdown — one tab each.
             with st.expander("Why this verdict? (how it was calculated)"):
-                st.caption(
-                    f"Base score {verdict.score:.1f}/100 from "
-                    f"{len(verdict.breakdown)} signals "
-                    f"(50 = neutral; each signal adds or subtracts points)."
-                )
-                for s in verdict.breakdown:
-                    sign = "+" if s.points > 0 else ""  # minus prints itself
-                    st.write(f"- **{s.name}** — {s.measured} → **{sign}{s.points}**")
-        elif verdict is not None and verdict.found and not verdict.enough_data:
-            st.info(f"Verdict: {verdict.reason}")
-        # (If the ticker wasn't found at all, the not-found error above covers it.)
+                tabs = st.tabs([HORIZON_NAMES.get(h, h) for h in engine.HORIZONS])
+                for tab, horizon in zip(tabs, engine.HORIZONS):
+                    hv = verdict.horizons.get(horizon)
+                    with tab:
+                        if hv is None or not hv.enough_data:
+                            st.info(hv.reason if hv else "Not enough data.")
+                            continue
+                        st.caption(
+                            f"Weighted score {hv.score:.1f}/100 (50 = neutral). "
+                            "Each signal: base points × horizon weight = contribution."
+                        )
+                        for ws in hv.breakdown:
+                            base_sign = "+" if ws.points > 0 else ""  # minus self-prints
+                            w_sign = "+" if ws.weighted > 0 else ""
+                            st.write(
+                                f"- **{ws.name}** — {ws.measured} | "
+                                f"base {base_sign}{ws.points} × weight {ws.weight:.1f} "
+                                f"= **{w_sign}{ws.weighted:.1f}**"
+                            )
 
         # --- Price history chart ----------------------------------------
         st.divider()

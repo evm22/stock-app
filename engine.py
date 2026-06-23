@@ -423,6 +423,63 @@ def _rsi(closes, period: int = 14):
     return float(last) if _is_number(last) else None
 
 
+def _ema(series, span):
+    """
+    Exponential Moving Average: like a moving average, but recent prices count
+    for more (older prices fade away smoothly). `span` is the EMA "length".
+    """
+    return series.ewm(span=span, adjust=False).mean()
+
+
+def _macd(closes, fast: int = 12, slow: int = 26, signal: int = 9):
+    """
+    MACD (Moving Average Convergence Divergence) — a trend/momentum indicator.
+
+    Math:
+      1. MACD line   = (fast EMA, 12) minus (slow EMA, 26)
+                       -> positive when short-term trend is above long-term.
+      2. Signal line = 9-period EMA of the MACD line (a smoothed version).
+      3. Histogram   = MACD line minus Signal line
+                       -> positive & rising = strengthening up-move.
+
+    Returns the latest (macd_line, signal_line, histogram) as floats, or
+    (None, None, None) if there isn't enough history.
+    """
+    if closes is None or len(closes) < slow + signal:
+        return None, None, None
+    macd_line = _ema(closes, fast) - _ema(closes, slow)
+    signal_line = _ema(macd_line, signal)
+    histogram = macd_line - signal_line
+    m, s, h = macd_line.iloc[-1], signal_line.iloc[-1], histogram.iloc[-1]
+    if not (_is_number(m) and _is_number(s) and _is_number(h)):
+        return None, None, None
+    return float(m), float(s), float(h)
+
+
+def _bollinger(closes, period: int = 20, num_std: float = 2.0):
+    """
+    Bollinger Bands — a volatility envelope around a moving average.
+
+    Math (using the last `period` closes):
+      middle = simple moving average (the 20-day SMA)
+      band   = standard deviation of those closes
+      upper  = middle + 2 * band
+      lower  = middle - 2 * band
+    Price near the upper band = stretched high; near the lower band = stretched
+    low. We use population std (ddof=0), the textbook Bollinger convention.
+
+    Returns latest (upper, middle, lower) as floats, or (None, None, None).
+    """
+    if closes is None or len(closes) < period:
+        return None, None, None
+    window = closes.tail(period)
+    middle = window.mean()
+    band = window.std(ddof=0)
+    if not (_is_number(middle) and _is_number(band)):
+        return None, None, None
+    return float(middle + num_std * band), float(middle), float(middle - num_std * band)
+
+
 def get_stock_technicals(ticker: str) -> MetricGroup:
     """
     Indicators about the *share price behaviour*: 52-week high/low, 50-day and
@@ -464,6 +521,24 @@ def get_stock_technicals(ticker: str) -> MetricGroup:
     if not _is_number(low52) and closes is not None:
         low52 = float(closes.min())
 
+    # MACD (trend/momentum) computed from the daily closes.
+    macd_line, macd_signal, macd_hist = _macd(closes)
+    macd_state = None
+    if _is_number(macd_line) and _is_number(macd_signal):
+        macd_state = "bullish" if macd_line > macd_signal else "bearish"
+
+    # Bollinger Bands, plus where the latest close sits relative to them.
+    bb_upper, bb_middle, bb_lower = _bollinger(closes)
+    last_close = float(closes.iloc[-1]) if closes is not None and len(closes) else None
+    bb_state = None
+    if _is_number(bb_upper) and _is_number(bb_lower) and _is_number(last_close):
+        if last_close > bb_upper:
+            bb_state = "above upper / overbought"
+        elif last_close < bb_lower:
+            bb_state = "below lower / oversold"
+        else:
+            bb_state = "within bands"
+
     metrics = {
         "week52_high": _metric("52-week high", high52, "money", "info/history"),
         "week52_low":  _metric("52-week low", low52, "money", "info/history"),
@@ -472,60 +547,120 @@ def get_stock_technicals(ticker: str) -> MetricGroup:
         "rsi":         _metric("RSI (14)", rsi, "ratio", "computed:closes"),
         "beta":        _metric("Beta", info.get("beta"), "ratio", "info.beta"),
         "avg_volume":  _metric("Avg volume", info.get("averageVolume"), "int_large", "info.averageVolume"),
+        # New in this run: MACD and Bollinger Bands.
+        "macd":        _metric("MACD line", macd_line, "ratio", "computed:closes"),
+        "macd_signal": _metric("MACD signal", macd_signal, "ratio", "computed:closes"),
+        "macd_hist":   _metric("MACD histogram", macd_hist, "ratio", "computed:closes"),
+        "macd_state":  _metric("MACD trend", macd_state, "text", "computed:closes"),
+        "bb_upper":    _metric("Bollinger upper", bb_upper, "money", "computed:closes"),
+        "bb_middle":   _metric("Bollinger mid (20d SMA)", bb_middle, "money", "computed:closes"),
+        "bb_lower":    _metric("Bollinger lower", bb_lower, "money", "computed:closes"),
+        "bb_state":    _metric("Bollinger position", bb_state, "text", "computed:closes"),
     }
     return MetricGroup(True, display, currency, metrics)
 
 
-# --- Deterministic verdict (Step 4) --------------------------------------
+# --- Deterministic verdict (Step 4, now across three time horizons) -------
 
 # The four possible verdict labels, worst -> best.
 VERDICT_LABELS = ["Sell", "Hold", "Buy", "Strong Buy"]
 
-# We need at least this many usable signals to dare give a verdict.
+# The three time horizons we report, short -> long.
+HORIZONS = ["6M", "1Y", "5Y"]
+
+# We need at least this many weighted signals to dare give a verdict.
 MIN_SIGNALS = 4
+
+# Each signal contributes at most this many BASE points (positive or negative),
+# before horizon weighting. Used to scale the score onto 0..100.
+_MAX_POINTS_PER_SIGNAL = 2
+
+
+# --- Horizon weight sets --------------------------------------------------
+# The THREE horizons use the SAME signals (evaluated once); they differ ONLY by
+# how much each signal counts. Rationale (tune these freely later):
+#   * 6M  (short term): price action dominates -> momentum/technicals carry the
+#         big weights (RSI, MACD, Bollinger, 50-day MA, 52w position, MA cross);
+#         slow-moving fundamentals barely matter over six months.
+#   * 1Y  (medium term): a balanced 1.0 weight on everything.
+#   * 5Y  (long term): the business matters most -> fundamentals dominate
+#         (margin, P/E, free cash flow, debt, 200-day trend); short-term
+#         momentum is almost ignored.
+# A weight of 0 would mean "ignore this signal for this horizon".
+HORIZON_WEIGHTS = {
+    "6M": {
+        "rsi": 2.0, "macd": 2.0, "bollinger": 2.0, "ma50": 2.0,
+        "range52": 1.5, "ma_cross": 1.5, "ma200": 1.0,
+        "pe": 0.5, "fwd_pe": 0.5, "margin": 0.5, "d2e": 0.5, "fcf": 0.5,
+    },
+    "1Y": {
+        "rsi": 1.0, "macd": 1.0, "bollinger": 1.0, "ma50": 1.0,
+        "range52": 1.0, "ma_cross": 1.0, "ma200": 1.0,
+        "pe": 1.0, "fwd_pe": 1.0, "margin": 1.0, "d2e": 1.0, "fcf": 1.0,
+    },
+    "5Y": {
+        "pe": 2.0, "margin": 2.0, "fcf": 2.0, "d2e": 1.5, "fwd_pe": 1.5,
+        "ma200": 1.5, "ma_cross": 1.0, "range52": 0.5,
+        "rsi": 0.3, "macd": 0.3, "bollinger": 0.3, "ma50": 0.3,
+    },
+}
+
+# If a horizon doesn't list a signal, fall back to this neutral weight.
+_DEFAULT_WEIGHT = 1.0
 
 
 @dataclass
 class Signal:
     """
-    One rule's contribution to the verdict.
+    One rule's BASE contribution (before horizon weighting).
 
-    - `name`     : what the rule looks at, e.g. "Valuation (P/E)".
-    - `measured` : the value it saw, in words, e.g. "P/E = 35.9 (expensive)".
-    - `points`   : how many points it added (+) or removed (-). Each signal is
-                   capped at +/-2, so the score maths stay simple.
+    - `key`      : stable id used to look up a horizon weight, e.g. "rsi".
+    - `name`     : human label, e.g. "Momentum (RSI)".
+    - `measured` : the value it saw, in words.
+    - `points`   : base points, capped at +/-2.
     """
+    key: str
     name: str
     measured: str
     points: int
 
 
 @dataclass
+class WeightedSignal:
+    """A Signal as it counts for ONE horizon: base points x horizon weight."""
+    key: str
+    name: str
+    measured: str
+    points: int
+    weight: float
+    weighted: float   # points * weight (the actual contribution)
+
+
+@dataclass
+class HorizonVerdict:
+    """The verdict for a single horizon (6M / 1Y / 5Y)."""
+    horizon: str
+    label: str = ""
+    score: Optional[float] = None
+    enough_data: bool = True
+    reason: str = ""
+    breakdown: list = field(default_factory=list)  # list[WeightedSignal]
+
+
+@dataclass
 class Verdict:
     """
-    The rule-based verdict result.
+    The full rule-based verdict across all three horizons.
 
-    - found       : False if the ticker doesn't exist at all.
-    - enough_data : False if we found the ticker but had too few signals to
-                    judge it (then `label`/`score` stay empty and `reason`
-                    explains).
-    - label       : one of VERDICT_LABELS (when enough_data).
-    - score       : 0..100 (50 = neutral); higher = more bullish.
-    - breakdown   : the list of Signals, the basis for "explain how it was
-                    calculated".
+    - found    : False if the ticker doesn't exist at all.
+    - horizons : dict "6M"/"1Y"/"5Y" -> HorizonVerdict.
+    - signals  : the base Signals, evaluated ONCE and shared by all horizons.
     """
     found: bool
     symbol: str
-    label: str = ""
-    score: Optional[float] = None
-    breakdown: list = field(default_factory=list)
-    enough_data: bool = True
+    horizons: dict = field(default_factory=dict)
+    signals: list = field(default_factory=list)
     reason: str = ""
-
-
-# Each signal contributes at most this many points (positive or negative).
-# Used as the denominator so the score scales onto a fixed 0..100 range.
-_MAX_POINTS_PER_SIGNAL = 2
 
 
 def _label_for_score(score: float) -> str:
@@ -539,14 +674,49 @@ def _label_for_score(score: float) -> str:
     return "Strong Buy"
 
 
+def _score_horizon(horizon: str, signals: list) -> HorizonVerdict:
+    """
+    Apply one horizon's weights to the shared base signals and produce its
+    HorizonVerdict (weighted score on the same 0..100 scale + a per-signal
+    breakdown showing base points, weight, and weighted contribution).
+    """
+    weights = HORIZON_WEIGHTS[horizon]
+    breakdown = []
+    weighted_sum = 0.0
+    max_swing = 0.0
+    effective = 0  # how many signals actually count (weight > 0)
+
+    for s in signals:
+        weight = weights.get(s.key, _DEFAULT_WEIGHT)
+        contribution = s.points * weight
+        breakdown.append(WeightedSignal(s.key, s.name, s.measured, s.points,
+                                        weight, contribution))
+        if weight > 0:
+            effective += 1
+            weighted_sum += contribution
+            max_swing += _MAX_POINTS_PER_SIGNAL * weight
+
+    if effective < MIN_SIGNALS or max_swing == 0:
+        return HorizonVerdict(
+            horizon, enough_data=False, breakdown=breakdown,
+            reason=f"Not enough data for the {horizon} horizon "
+                   f"({effective} weighted signal(s)).")
+
+    score = 50 + 50 * (weighted_sum / max_swing)
+    score = max(0.0, min(100.0, score))  # clamp into [0, 100]
+    return HorizonVerdict(horizon, label=_label_for_score(score), score=score,
+                          enough_data=True, breakdown=breakdown)
+
+
 def compute_verdict(ticker: str) -> Verdict:
     """
-    Produce a transparent, rule-based Buy/Hold/Sell-style verdict from the
-    fundamentals and technicals we already collect. No LLM, no analyst data —
-    just clearly-defined rules, each contributing points to a base score.
+    Produce transparent, rule-based verdicts for THREE time horizons
+    (6M / 1Y / 5Y) from the fundamentals and technicals we already collect.
 
-    Every rule is skipped gracefully if its input is missing, so sparse tickers
-    simply get fewer signals (and "not enough data" if too few).
+    The signals are evaluated ONCE; the horizons differ only by how heavily
+    each signal is weighted (see HORIZON_WEIGHTS). No LLM, no analyst data, no
+    predicting the future — just today's data, weighted three ways. Rules are
+    skipped gracefully when inputs are missing.
     """
     symbol = (ticker or "").strip()
     display = symbol.upper()
@@ -581,96 +751,100 @@ def compute_verdict(ticker: str) -> Verdict:
     rsi = value_of(technicals, "rsi")
     high52 = value_of(technicals, "week52_high")
     low52 = value_of(technicals, "week52_low")
+    macd_line = value_of(technicals, "macd")
+    macd_signal = value_of(technicals, "macd_signal")
+    bb_upper = value_of(technicals, "bb_upper")
+    bb_lower = value_of(technicals, "bb_lower")
 
     signals: list = []
 
-    def add(name, measured, points):
-        signals.append(Signal(name, measured, points))
+    def add(key, name, measured, points):
+        signals.append(Signal(key, name, measured, points))
 
     # 1) Valuation — trailing P/E vs reasonable bands.
     if _is_number(pe):
         if pe <= 0:
-            add("Valuation (P/E)", f"P/E = {pe:.1f} (no positive earnings)", -1)
+            add("pe", "Valuation (P/E)", f"P/E = {pe:.1f} (no positive earnings)", -1)
         elif pe <= 15:
-            add("Valuation (P/E)", f"P/E = {pe:.1f} (cheap)", +2)
+            add("pe", "Valuation (P/E)", f"P/E = {pe:.1f} (cheap)", +2)
         elif pe <= 25:
-            add("Valuation (P/E)", f"P/E = {pe:.1f} (fair)", +1)
+            add("pe", "Valuation (P/E)", f"P/E = {pe:.1f} (fair)", +1)
         elif pe <= 40:
-            add("Valuation (P/E)", f"P/E = {pe:.1f} (full)", 0)
+            add("pe", "Valuation (P/E)", f"P/E = {pe:.1f} (full)", 0)
         else:
-            add("Valuation (P/E)", f"P/E = {pe:.1f} (expensive)", -1)
+            add("pe", "Valuation (P/E)", f"P/E = {pe:.1f} (expensive)", -1)
 
     # 2) Earnings outlook — forward P/E lower than trailing means earnings are
     #    expected to grow (cheaper on next year's profits).
     if _is_number(pe) and _is_number(forward_pe) and pe > 0 and forward_pe > 0:
         if forward_pe < pe:
-            add("Earnings outlook (fwd P/E)",
+            add("fwd_pe", "Earnings outlook (fwd P/E)",
                 f"forward {forward_pe:.1f} < trailing {pe:.1f} (improving)", +1)
         elif forward_pe > pe:
-            add("Earnings outlook (fwd P/E)",
+            add("fwd_pe", "Earnings outlook (fwd P/E)",
                 f"forward {forward_pe:.1f} > trailing {pe:.1f} (softening)", -1)
         else:
-            add("Earnings outlook (fwd P/E)", f"forward = trailing ({pe:.1f})", 0)
+            add("fwd_pe", "Earnings outlook (fwd P/E)", f"forward = trailing ({pe:.1f})", 0)
 
     # 3) Profitability — net profit margin (stored as a fraction).
     if _is_number(margin):
         pct = margin * 100
         if margin <= 0:
-            add("Profitability (margin)", f"margin {pct:.1f}% (unprofitable)", -2)
+            add("margin", "Profitability (margin)", f"margin {pct:.1f}% (unprofitable)", -2)
         elif margin < 0.05:
-            add("Profitability (margin)", f"margin {pct:.1f}% (thin)", 0)
+            add("margin", "Profitability (margin)", f"margin {pct:.1f}% (thin)", 0)
         elif margin < 0.20:
-            add("Profitability (margin)", f"margin {pct:.1f}% (healthy)", +1)
+            add("margin", "Profitability (margin)", f"margin {pct:.1f}% (healthy)", +1)
         else:
-            add("Profitability (margin)", f"margin {pct:.1f}% (strong)", +2)
+            add("margin", "Profitability (margin)", f"margin {pct:.1f}% (strong)", +2)
 
     # 4) Financial health — debt-to-equity (yfinance reports it %-style, e.g. 79).
     if _is_number(debt_to_equity):
         if debt_to_equity < 50:
-            add("Leverage (debt/equity)", f"D/E = {debt_to_equity:.0f} (low)", +1)
+            add("d2e", "Leverage (debt/equity)", f"D/E = {debt_to_equity:.0f} (low)", +1)
         elif debt_to_equity <= 150:
-            add("Leverage (debt/equity)", f"D/E = {debt_to_equity:.0f} (moderate)", 0)
+            add("d2e", "Leverage (debt/equity)", f"D/E = {debt_to_equity:.0f} (moderate)", 0)
         else:
-            add("Leverage (debt/equity)", f"D/E = {debt_to_equity:.0f} (high)", -1)
+            add("d2e", "Leverage (debt/equity)", f"D/E = {debt_to_equity:.0f} (high)", -1)
 
     # 5) Financial health — free cash flow positive or negative.
     if _is_number(free_cash_flow):
         if free_cash_flow > 0:
-            add("Free cash flow", "positive free cash flow", +1)
+            add("fcf", "Free cash flow", "positive free cash flow", +1)
         else:
-            add("Free cash flow", "negative free cash flow", -1)
+            add("fcf", "Free cash flow", "negative free cash flow", -1)
 
     # 6) Trend — price above/below its 50-day moving average.
     if _is_number(price) and _is_number(ma50):
         if price >= ma50:
-            add("Trend (vs 50-day MA)", f"price {price:.2f} >= 50d MA {ma50:.2f}", +1)
+            add("ma50", "Trend (vs 50-day MA)", f"price {price:.2f} >= 50d MA {ma50:.2f}", +1)
         else:
-            add("Trend (vs 50-day MA)", f"price {price:.2f} < 50d MA {ma50:.2f}", -1)
+            add("ma50", "Trend (vs 50-day MA)", f"price {price:.2f} < 50d MA {ma50:.2f}", -1)
 
     # 7) Trend — price above/below its 200-day moving average.
     if _is_number(price) and _is_number(ma200):
         if price >= ma200:
-            add("Trend (vs 200-day MA)", f"price {price:.2f} >= 200d MA {ma200:.2f}", +1)
+            add("ma200", "Trend (vs 200-day MA)", f"price {price:.2f} >= 200d MA {ma200:.2f}", +1)
         else:
-            add("Trend (vs 200-day MA)", f"price {price:.2f} < 200d MA {ma200:.2f}", -1)
+            add("ma200", "Trend (vs 200-day MA)", f"price {price:.2f} < 200d MA {ma200:.2f}", -1)
 
     # 8) Trend — 50-day vs 200-day (golden cross = up, death cross = down).
     if _is_number(ma50) and _is_number(ma200):
         if ma50 >= ma200:
-            add("MA cross (50 vs 200)",
+            add("ma_cross", "MA cross (50 vs 200)",
                 f"50d {ma50:.2f} >= 200d {ma200:.2f} (golden cross)", +1)
         else:
-            add("MA cross (50 vs 200)",
+            add("ma_cross", "MA cross (50 vs 200)",
                 f"50d {ma50:.2f} < 200d {ma200:.2f} (death cross)", -1)
 
     # 9) Momentum — RSI overbought (>70) / oversold (<30) / neutral.
     if _is_number(rsi):
         if rsi > 70:
-            add("Momentum (RSI)", f"RSI {rsi:.0f} (overbought)", -1)
+            add("rsi", "Momentum (RSI)", f"RSI {rsi:.0f} (overbought)", -1)
         elif rsi < 30:
-            add("Momentum (RSI)", f"RSI {rsi:.0f} (oversold)", +1)
+            add("rsi", "Momentum (RSI)", f"RSI {rsi:.0f} (oversold)", +1)
         else:
-            add("Momentum (RSI)", f"RSI {rsi:.0f} (neutral)", 0)
+            add("rsi", "Momentum (RSI)", f"RSI {rsi:.0f} (neutral)", 0)
 
     # 10) Position within the 52-week range (relative strength).
     if (_is_number(price) and _is_number(high52) and _is_number(low52)
@@ -678,22 +852,31 @@ def compute_verdict(ticker: str) -> Verdict:
         position = (price - low52) / (high52 - low52)
         pct = position * 100
         if position >= 0.5:
-            add("52-week range position", f"{pct:.0f}% of range (upper half)", +1)
+            add("range52", "52-week range position", f"{pct:.0f}% of range (upper half)", +1)
         else:
-            add("52-week range position", f"{pct:.0f}% of range (lower half)", -1)
+            add("range52", "52-week range position", f"{pct:.0f}% of range (lower half)", -1)
 
-    # Too few signals -> say so rather than give a misleading verdict.
-    n_signals = len(signals)
-    if n_signals < MIN_SIGNALS:
-        return Verdict(
-            True, display, breakdown=signals, enough_data=False,
-            reason=f"Not enough data for a verdict (only {n_signals} signal(s)).")
+    # 11) Momentum — MACD line above/below its signal line.
+    if _is_number(macd_line) and _is_number(macd_signal):
+        if macd_line > macd_signal:
+            add("macd", "Momentum (MACD)",
+                f"MACD {macd_line:.2f} > signal {macd_signal:.2f} (bullish)", +1)
+        else:
+            add("macd", "Momentum (MACD)",
+                f"MACD {macd_line:.2f} < signal {macd_signal:.2f} (bearish)", -1)
 
-    # Sum the points and scale onto 0..100 (50 = perfectly neutral).
-    raw_points = sum(s.points for s in signals)
-    denominator = _MAX_POINTS_PER_SIGNAL * n_signals  # max possible swing
-    score = 50 + 50 * (raw_points / denominator)
-    score = max(0.0, min(100.0, score))  # clamp into [0, 100]
+    # 12) Volatility position — current price vs the Bollinger Bands.
+    if _is_number(price) and _is_number(bb_upper) and _is_number(bb_lower):
+        if price > bb_upper:
+            add("bollinger", "Bollinger position",
+                f"price {price:.2f} above upper {bb_upper:.2f} (overbought)", -1)
+        elif price < bb_lower:
+            add("bollinger", "Bollinger position",
+                f"price {price:.2f} below lower {bb_lower:.2f} (oversold)", +1)
+        else:
+            add("bollinger", "Bollinger position",
+                f"price {price:.2f} within bands", 0)
 
-    return Verdict(True, display, label=_label_for_score(score), score=score,
-                   breakdown=signals, enough_data=True)
+    # Weight the shared signals three ways — once per horizon.
+    horizons = {h: _score_horizon(h, signals) for h in HORIZONS}
+    return Verdict(True, display, horizons=horizons, signals=signals)
