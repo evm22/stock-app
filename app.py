@@ -202,16 +202,23 @@ if query:
                    "`AVIV.TA`). Our free data source (Yahoo Finance) can't look up "
                    "Tel-Aviv stocks by their security number.")
     elif len(matches) == 1:
+        # Only one match -> nothing to ask, just use it.
         symbol = matches[0].symbol
     else:
-        # "Did you mean...?" picker so the user reaches the RIGHT stock.
+        # Several matches -> ASK first. index=None means nothing is pre-selected,
+        # so we do NOT analyse anything until the user actively picks the stock
+        # they meant (e.g. AVIV.TA rather than a US ETF).
         labels = {m.symbol: f"{m.symbol} - {m.name} ({m.exchange or '?'})"
                   for m in matches}
         symbol = st.selectbox(
-            "Did you mean...? (pick the right match)",
+            "Found several matches — which stock did you mean?",
             options=[m.symbol for m in matches],
+            index=None,
+            placeholder="Select the stock you meant...",
             format_func=lambda s: labels.get(s, s),
         )
+        if symbol is None:
+            st.caption("Pick a match above to see its analysis.")
 
 # Once we have a resolved symbol, run the full analysis on it.
 if symbol:
