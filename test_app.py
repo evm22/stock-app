@@ -177,6 +177,24 @@ def expect_format_metric_by_fmt():
           "int_large/text OK")
 
 
+def expect_volume_panel_readable():
+    """make_volume_chart: tall enough to read (height 200, up from 120) with
+    compact SI y-tick labels (50,000,000 -> '50M'). Crucially it KEEPS the zero
+    baseline -- volume must anchor at 0, so no domain-restricted y-scale."""
+    spec = app.make_volume_chart(_sample_history()).to_dict()
+    assert spec.get("height") == 200, \
+        f"volume panel should be height 200 (was 120), got {spec.get('height')!r}"
+    y = spec["encoding"]["y"]
+    assert y.get("field") == "Volume", "volume chart must encode Volume on y"
+    assert y.get("axis", {}).get("format") == "~s", \
+        f"volume y ticks should use SI format '~s', got {y.get('axis')!r}"
+    # Zero baseline: no domain restriction and zero not disabled.
+    scale = y.get("scale", {})
+    assert "domain" not in scale and scale.get("zero", True) is not False, \
+        f"volume y must keep its zero baseline (no domain, zero!=False), got {scale!r}"
+    print("      volume panel: height 200, SI y-ticks, zero baseline kept")
+
+
 def main():
     print("Running app display tests (no network)...\n")
     results = [
@@ -188,6 +206,8 @@ def main():
               expect_abbreviate_big_numbers),
         check("format_metric renders each fmt hint (percent_frac vs percent)",
               expect_format_metric_by_fmt),
+        check("volume panel is taller (200) with SI y-ticks and a zero baseline",
+              expect_volume_panel_readable),
     ]
 
     passed = sum(results)

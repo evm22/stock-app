@@ -254,9 +254,11 @@ def make_volume_chart(df):
         .mark_bar(color="#9aa0a6", opacity=0.6)  # muted grey, semi-transparent
         .encode(
             x=alt.X("Date:T", title=None),
-            y=alt.Y("Volume:Q", title="Volume"),
+            # "~s" gives compact SI tick labels (50,000,000 -> "50M").
+            y=alt.Y("Volume:Q", title="Volume", axis=alt.Axis(format="~s")),
         )
-        .properties(height=120)  # short, so it doesn't dominate the price chart
+        .properties(height=200)  # taller than before so bars aren't squished,
+        # but still clearly secondary to the price chart (Altair default ~300px)
     )
 
 
