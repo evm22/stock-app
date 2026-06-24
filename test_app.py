@@ -222,6 +222,69 @@ def expect_hebrew_alias_lookup():
     print("      hebrew alias lookup: אפל->AAPL, בנק הפועלים->POLI.TA, geresh OK")
 
 
+def expect_classify_metric():
+    """classify_metric colors good/neutral/bad, is sector-aware for valuation,
+    and leaves descriptive/missing fields uncolored (None). Pure, no network."""
+    c = engine.classify_metric
+
+    # Sector-aware valuation: a high-ish P/E in Technology is NOT "bad", but the
+    # SAME P/E with no sector falls to the generic absolute band (and IS bad).
+    assert c("pe", 45, {"sector": "Technology"}) == "neutral"
+    assert c("pe", 45, {}) == "bad"
+    assert c("pe", 12, {"sector": "Technology"}) == "good"
+    assert c("pe", 0, {}) == "bad"  # no positive earnings
+    assert c("forward_pe", 45, {"sector": "Technology"}) == "neutral"
+
+    # PEG: <=1.5 good, >2.5 bad, between neutral; negative -> uncolored.
+    assert c("peg", 0.8, {}) == "good"
+    assert c("peg", 2.0, {}) == "neutral"
+    assert c("peg", 3.0, {}) == "bad"
+    assert c("peg", -1.0, {}) is None
+
+    # Other company fundamentals.
+    assert c("profit_margin", 0.25, {}) == "good"
+    assert c("profit_margin", 0.03, {}) == "neutral"
+    assert c("profit_margin", -0.10, {}) == "bad"
+    assert c("earnings_growth", 0.30, {}) == "good"
+    assert c("earnings_growth", -0.05, {}) == "bad"
+    assert c("revenue_growth", 0.05, {}) == "neutral"
+    assert c("debt_to_equity", 30, {}) == "good"
+    assert c("debt_to_equity", 100, {}) == "neutral"
+    assert c("debt_to_equity", 200, {}) == "bad"
+    assert c("free_cash_flow", 1e9, {}) == "good"
+    assert c("free_cash_flow", -1e9, {}) == "bad"
+
+    # Stock technicals: RSI extremes are amber, healthy middle green.
+    assert c("rsi", 50, {}) == "good"
+    assert c("rsi", 80, {}) == "neutral"
+    assert c("rsi", 20, {}) == "neutral"
+    assert c("macd_state", "bullish", {}) == "good"
+    assert c("macd_state", "bearish", {}) == "bad"
+    # Price-vs-MA: above the MA = good, below = bad, no price in context -> None.
+    assert c("ma50", 100.0, {"price": 110.0}) == "good"
+    assert c("ma50", 100.0, {"price": 90.0}) == "bad"
+    assert c("ma200", 100.0, {}) is None
+
+    # Descriptive / identifier / informational keys are never colored.
+    for k, v in (("market_cap", 3e12), ("eps", 6.1), ("revenue", 4e11),
+                 ("dividend_yield", 0.5), ("sector", "Technology"),
+                 ("industry", "Consumer Electronics"), ("beta", 1.2),
+                 ("week52_high", 260.0), ("bb_state", "within bands"),
+                 ("avg_volume", 5e7), ("obv_trend", "rising")):
+        assert c(k, v, {}) is None, f"{k} should be uncolored, got {c(k, v, {})!r}"
+
+    # Missing data is never colored.
+    assert c("pe", None, {}) is None
+    assert c("profit_margin", None, {"sector": "Technology"}) is None
+
+    # threshold_note is honest about sector-adjusted vs generic thresholds.
+    assert "Technology" in engine.threshold_note("pe", {"sector": "Technology"})
+    assert "generic" in engine.threshold_note("pe", {}).lower()
+    assert engine.threshold_note("market_cap", {}) == ""
+    print("      classify_metric: sector-aware P/E (tech 45=neutral, generic "
+          "45=bad), good/neutral/bad bands, descriptive keys uncolored")
+
+
 def main():
     print("Running app display tests (no network)...\n")
     results = [
@@ -237,6 +300,8 @@ def main():
               expect_volume_panel_readable),
         check("hebrew alias lookup maps Hebrew names to tickers (no network)",
               expect_hebrew_alias_lookup),
+        check("classify_metric colors good/neutral/bad, sector-aware (no network)",
+              expect_classify_metric),
     ]
 
     passed = sum(results)

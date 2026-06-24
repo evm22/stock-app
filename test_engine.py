@@ -14,6 +14,7 @@ Note: this hits the live Yahoo Finance service, so you need an internet
 connection and an English (non-Hebrew) folder path for it to work locally.
 """
 
+import os
 import sys
 
 import pandas as pd
@@ -342,6 +343,43 @@ def expect_find_number_unresolvable(number):
     matches = find_tickers(number)
     assert matches == [], \
         f"expected no matches for bare number {number!r}, got {[m.symbol for m in matches]}"
+
+
+def expect_metric_tiles_colored(symbol):
+    """Drive the real UI (AppTest) for a live ticker and confirm the metric tiles
+    render with color cues (a 🟢/🟡/🔴 status dot on the label), keep their '?'
+    tooltips, and raise no exceptions."""
+    os.environ.setdefault("STOCKAPP_DISABLE_BROWSER_STORAGE", "1")
+    from streamlit.testing.v1 import AppTest
+
+    at = AppTest.from_file("app.py", default_timeout=90)
+    at.run()
+    at.text_input(key="search_box").set_value(symbol).run()
+    if len(at.selectbox) >= 1:                 # disambiguation picker
+        at.selectbox[0].set_value(symbol).run()
+    assert not at.exception, f"{symbol}: app raised {at.exception}"
+
+    tiles = at.metric
+    assert tiles, f"{symbol}: no metric tiles rendered"
+
+    def label_of(m):
+        return (getattr(m, "label", None)
+                or getattr(getattr(m, "proto", None), "label", "") or "")
+
+    def help_of(m):
+        return (getattr(m, "help", None)
+                or getattr(getattr(m, "proto", None), "help", "") or "")
+
+    dots = ("🟢", "🟡", "🔴")
+    colored = [m for m in tiles if any(d in label_of(m) for d in dots)]
+    with_help = [m for m in tiles if help_of(m)]
+    assert colored, f"{symbol}: expected some color-coded tiles, found none"
+    assert with_help, f"{symbol}: tiles lost their '?' tooltips"
+    # The dot is a prefix — the original metric text must still be there.
+    assert any(("P/E" in label_of(m)) or ("MA" in label_of(m)) for m in colored), \
+        f"{symbol}: colored tiles missing expected metric labels"
+    print(f"      {symbol}: {len(tiles)} tiles, {len(colored)} color-coded, "
+          f"{len(with_help)} keep tooltips")
 
 
 def expect_hebrew_aliases_resolve():
@@ -688,6 +726,11 @@ def main():
     # Hebrew-input search: every curated alias must resolve to a live ticker.
     results.append(check("Hebrew aliases all resolve to a live match",
                          lambda: expect_hebrew_aliases_resolve()))
+
+    # Color-coded metric tiles render in the real UI (AppTest), with tooltips.
+    for symbol in ["AAPL", "MSFT"]:
+        results.append(check(f"{symbol} metric tiles render with color cues",
+                             lambda s=symbol: expect_metric_tiles_colored(s)))
 
     # Step 5: analyst consensus (covered, uncovered, and invalid).
     for symbol in ["AAPL", "TEVA"]:

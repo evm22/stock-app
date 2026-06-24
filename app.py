@@ -139,11 +139,24 @@ PRESSURE_KEYS = ["avg_volume", "vol_recent", "vol_avg", "vol_move", "vol_confirm
                  "obv_value", "obv_trend", "ad_value", "ad_trend"]
 
 
-def render_metrics(group, keys=None, columns_per_row=3):
+# Subtle status cue: a small colored dot prefixed to the tile label. Green =
+# strength, amber = watch/mixed, red = weakness. Uncolored tiles render as before.
+_STATUS_DOT = {"good": "🟢", "neutral": "🟡", "bad": "🔴"}
+
+# Legend + disclaimer shown once per section that has colored tiles.
+COLOR_LEGEND = ("🟢 strength · 🟡 watch / mixed · 🔴 weakness — quick rules of "
+                "thumb from the numbers already shown, **not financial advice**.")
+
+
+def render_metrics(group, keys=None, columns_per_row=3, context=None):
     """
     Show a MetricGroup as a tidy grid of st.metric tiles (n/a when missing),
     each with a plain-language "?" help tooltip. Pass `keys` to render only a
     subset (and in that order), e.g. to split a section into sub-groups.
+
+    `context` (sector, current price) drives the color cue: each tile with a
+    meaningful good/bad direction gets a small colored dot on its label. Tiles
+    without a direction (or missing data) render exactly as before.
     """
     if keys is None:
         items = list(group.metrics.items())
@@ -153,8 +166,16 @@ def render_metrics(group, keys=None, columns_per_row=3):
         row = items[start:start + columns_per_row]
         columns = st.columns(columns_per_row)
         for column, (key, metric) in zip(columns, row):
-            column.metric(metric.label, format_metric(metric, group.currency),
-                          help=engine.HELP_TEXTS.get(key))
+            status = engine.classify_metric(key, metric.value, context)
+            label = metric.label
+            help_text = engine.HELP_TEXTS.get(key) or ""
+            if status in _STATUS_DOT:
+                label = f"{_STATUS_DOT[status]} {metric.label}"
+                note = engine.threshold_note(key, context)
+                if note:
+                    help_text = f"{help_text}  {note}".strip()
+            column.metric(label, format_metric(metric, group.currency),
+                          help=help_text or None)
 
 
 def make_candlestick(df, pct_first_close=None):
@@ -695,8 +716,16 @@ if symbol:
             company = load_company(symbol)
         except Exception:
             company = None
+        # Context for the color cues: the stock's sector (for sector-aware
+        # valuation thresholds) and its current price (for price-vs-MA).
+        sector = None
+        if company is not None and company.found:
+            sm = company.metrics.get("sector")
+            sector = sm.value if (sm and sm.available) else None
+        metric_context = {"sector": sector, "price": quote.price}
         if company is not None and company.found and company.metrics:
-            render_metrics(company)
+            st.caption(COLOR_LEGEND)
+            render_metrics(company, context=metric_context)
         else:
             st.info("No company metrics available for this ticker.")
 
@@ -711,11 +740,12 @@ if symbol:
         if technicals is not None and technicals.found and technicals.metrics:
             # Group 1: price levels, trend & momentum.
             st.markdown("**Price levels, trend & momentum**")
-            render_metrics(technicals, keys=PRICE_TREND_KEYS)
+            st.caption(COLOR_LEGEND)
+            render_metrics(technicals, keys=PRICE_TREND_KEYS, context=metric_context)
             # Group 2: volume & buy/sell pressure (kept together and labelled so
             # the OBV / A-D / volume-confirmation tiles are easy to find).
             st.markdown("**Volume & buy/sell pressure (estimates)**")
-            render_metrics(technicals, keys=PRESSURE_KEYS)
+            render_metrics(technicals, keys=PRESSURE_KEYS, context=metric_context)
             st.caption(
                 "Note: free data doesn't separate buy-volume from sell-volume, "
                 "so **OBV** and **Accumulation/Distribution** are *estimates* of "

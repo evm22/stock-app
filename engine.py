@@ -1048,6 +1048,167 @@ def get_stock_technicals(ticker: str) -> MetricGroup:
     return MetricGroup(True, display, currency, metrics)
 
 
+# --- Color-coding metric tiles (rules of thumb, NOT financial advice) ------
+#
+# classify_metric() returns "good" / "neutral" / "bad" for metrics that carry a
+# clear good/bad direction, or None for descriptive / identifier fields and
+# missing data (those render uncolored). It uses only metrics we already compute
+# — no new data — and the thresholds mirror the verdict's own rules (see
+# compute_verdict) so the colors stay consistent with the score.
+#
+# Valuation metrics (P/E, forward P/E) are SECTOR-AWARE where yfinance gives a
+# sector: a tech P/E of 45 shouldn't read "bad" the way a utility's would. With
+# no sector we fall back to a generic absolute band, and threshold_note() makes
+# the tooltip say so. These are conventional rules of thumb, not advice.
+
+# Typical trailing-P/E bands per sector: (good at/below, bad above); the span in
+# between is "neutral". Rough order-of-magnitude rules of thumb, not benchmarks.
+_SECTOR_PE_BANDS = {
+    "Technology":             (35, 60),
+    "Communication Services": (30, 50),
+    "Consumer Cyclical":      (28, 50),
+    "Healthcare":             (28, 50),
+    "Industrials":            (25, 45),
+    "Consumer Defensive":     (25, 40),
+    "Basic Materials":        (20, 38),
+    "Energy":                 (18, 32),
+    "Financial Services":     (16, 30),
+    "Utilities":              (20, 34),
+    "Real Estate":            (28, 50),
+}
+# Used when the sector is unknown (and flagged as generic in the tooltip).
+_GENERIC_PE_BAND = (25, 40)
+
+# Metrics with no meaningful good/bad direction — always uncolored (descriptive
+# identifiers, raw levels, and informational fields). The MA *levels* live here;
+# the ma50/ma200 tiles are instead colored by PRICE-vs-MA (handled below), not by
+# the level itself.
+_UNCOLORED_KEYS = frozenset({
+    "market_cap", "eps", "revenue", "dividend_yield", "next_earnings",
+    "sector", "industry",
+    "week52_high", "week52_low", "beta", "avg_volume",
+    "macd", "macd_signal", "macd_hist",
+    "bb_upper", "bb_middle", "bb_lower", "bb_state",
+    "vol_recent", "vol_avg", "vol_move", "vol_confirm",
+    "obv_value", "obv_trend", "ad_value", "ad_trend",
+})
+
+
+def _pe_class(value, sector):
+    """Sector-aware P/E classification (lower is better)."""
+    if value <= 0:
+        return "bad"  # no positive earnings
+    good_below, bad_above = _SECTOR_PE_BANDS.get(sector, _GENERIC_PE_BAND)
+    if value <= good_below:
+        return "good"
+    if value > bad_above:
+        return "bad"
+    return "neutral"
+
+
+def classify_metric(key, value, context=None):
+    """
+    Classify a displayed metric for color-coding:
+      "good" (green) | "neutral" (amber) | "bad" (red) | None (don't color).
+
+    None covers descriptive/identifier fields (market cap, sector, EPS, raw
+    volumes, MA price levels, Bollinger position, ...), informational fields
+    (dividend yield), and any missing value. `context` may carry "sector" (for
+    sector-aware valuation) and "price" (for price-vs-MA). Thresholds mirror the
+    verdict's rules. These are rules of thumb, NOT financial advice.
+    """
+    context = context or {}
+    sector = context.get("sector")
+    price = context.get("price")
+
+    if value is None or key in _UNCOLORED_KEYS:
+        return None
+
+    # Text-valued signal: MACD trend (its "value" is a label, not a number).
+    if key == "macd_state":
+        if value == "bullish":
+            return "good"
+        if value == "bearish":
+            return "bad"
+        return None
+
+    # Everything else colored is numeric — require a real number.
+    try:
+        v = float(value)
+    except (TypeError, ValueError):
+        return None
+    if math.isnan(v):
+        return None
+
+    # --- Company fundamentals ---
+    if key in ("pe", "forward_pe"):
+        return _pe_class(v, sector)
+    if key == "peg":
+        if v <= 0:
+            return None       # a negative PEG isn't a meaningful cheap/dear read
+        if v <= 1.5:
+            return "good"
+        if v > 2.5:
+            return "bad"
+        return "neutral"
+    if key == "profit_margin":            # fraction: <=0 unprofitable, <5% thin
+        if v <= 0:
+            return "bad"
+        if v < 0.05:
+            return "neutral"
+        return "good"
+    if key in ("earnings_growth", "revenue_growth"):  # fraction
+        if v <= 0:
+            return "bad"
+        if v < 0.10:
+            return "neutral"
+        return "good"
+    if key == "debt_to_equity":           # %-style (79 = 0.79x); lower is better
+        if v < 0:
+            return "bad"      # negative equity
+        if v < 50:
+            return "good"
+        if v <= 150:
+            return "neutral"
+        return "bad"
+    if key == "free_cash_flow":
+        return "good" if v > 0 else "bad"
+
+    # --- Stock technicals ---
+    if key == "rsi":          # extremes = amber (watch), healthy middle = green
+        return "neutral" if (v > 70 or v < 30) else "good"
+    if key in ("ma50", "ma200"):          # color the tile by PRICE vs this MA
+        if price is None:
+            return None
+        try:
+            p = float(price)
+        except (TypeError, ValueError):
+            return None
+        if math.isnan(p):
+            return None
+        return "good" if p >= v else "bad"
+
+    return None
+
+
+def threshold_note(key, context=None):
+    """A short tooltip add-on explaining a color threshold's basis (or "").
+
+    Honest about sector-adjusted vs generic thresholds, per the design.
+    """
+    context = context or {}
+    sector = context.get("sector")
+    if key in ("pe", "forward_pe"):
+        if sector:
+            return f"Color threshold is adjusted for the {sector} sector."
+        return ("Color threshold is generic (sector unknown), so it is NOT "
+                "sector-adjusted.")
+    if key == "peg":
+        return ("Color uses a generic PEG rule of thumb (<=1.5 good, >2.5 "
+                "expensive); PEG already accounts for growth.")
+    return ""
+
+
 # --- Deterministic verdict (Step 4, now across three time horizons) -------
 
 # The four possible verdict labels, worst -> best.
