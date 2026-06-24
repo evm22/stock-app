@@ -127,6 +127,48 @@ def expect_percent_mode_adds_baseline_and_axis():
           f"{base:.2f}; right axis [{dom[0]:.1f}%, {dom[1]:.1f}%]")
 
 
+def expect_abbreviate_big_numbers():
+    """_abbreviate shortens large numbers with a T/B/M/K suffix, and leaves
+    small ones plain."""
+    cases = [
+        (4_362_291_642_368, "4.36T"),
+        (1_500_000_000, "1.50B"),
+        (2_500_000, "2.50M"),
+        (3_500, "3.50K"),
+        (500, "500"),
+        (-2_500_000, "-2.50M"),   # magnitude picks the suffix, sign is kept
+    ]
+    for number, expected in cases:
+        got = app._abbreviate(number)
+        assert got == expected, f"_abbreviate({number}) -> {got!r}, want {expected!r}"
+    print(f"      _abbreviate: {[c[1] for c in cases]}")
+
+
+def expect_format_metric_by_fmt():
+    """format_metric renders each fmt hint correctly. The tricky one (flagged in
+    the code) is percent_frac (a FRACTION, *100) vs percent (ALREADY a percent)."""
+    def m(value, fmt, available=True):
+        return engine.Metric("label", value, available, fmt, "src")
+
+    # Missing values always show a friendly n/a, whatever the fmt.
+    assert app.format_metric(m(None, "money", available=False), "USD") == "n/a"
+
+    # Money formats carry the currency; ratios/percents do not.
+    assert app.format_metric(m(4_362_291_642_368, "large_money"), "USD") == "4.36T USD"
+    assert app.format_metric(m(123.456, "money"), "USD") == "123.46 USD"
+    assert app.format_metric(m(12.345, "ratio"), "USD") == "12.35"
+    # The footgun: profitMargins is a fraction -> *100; dividendYield already %.
+    assert app.format_metric(m(0.2715, "percent_frac"), "USD") == "27.15%"
+    assert app.format_metric(m(0.36, "percent"), "USD") == "0.36%"
+    assert app.format_metric(m(5_000_000, "int_large"), "USD") == "5.00M"
+    # text / date pass straight through.
+    assert app.format_metric(m("Technology", "text"), "USD") == "Technology"
+    # No currency string -> money values just omit the suffix.
+    assert app.format_metric(m(10.0, "money"), "") == "10.00"
+    print("      format_metric: large_money/money/ratio/percent_frac/percent/"
+          "int_large/text OK")
+
+
 def main():
     print("Running app display tests (no network)...\n")
     results = [
@@ -134,6 +176,10 @@ def main():
               expect_plain_candles_unchanged),
         check("percent candlestick adds 0% baseline + linked % axis",
               expect_percent_mode_adds_baseline_and_axis),
+        check("_abbreviate shortens big numbers (T/B/M/K)",
+              expect_abbreviate_big_numbers),
+        check("format_metric renders each fmt hint (percent_frac vs percent)",
+              expect_format_metric_by_fmt),
     ]
 
     passed = sum(results)
