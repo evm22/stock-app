@@ -16,6 +16,13 @@ Prints a clear ASCII PASS/FAIL per check and exits 0 if all passed, 1 otherwise.
 import os
 import sys
 
+# The Hebrew-alias test prints non-ASCII; keep stdout from crashing on a Windows
+# console whose encoding can't represent it.
+try:
+    sys.stdout.reconfigure(errors="replace")
+except Exception:
+    pass
+
 # app.py reaches for the browser's localStorage on import; this seam keeps the
 # (browser-blocking) component out of the way when there's no real Streamlit
 # server, exactly like AppTest does. Set it BEFORE importing app.
@@ -195,6 +202,26 @@ def expect_volume_panel_readable():
     print("      volume panel: height 200, SI y-ticks, zero baseline kept")
 
 
+def expect_hebrew_alias_lookup():
+    """normalize_hebrew + the alias map turn Hebrew names into the right target,
+    with NO network (pure dict/normalization logic). The live tickers themselves
+    are checked separately in test_engine.expect_hebrew_aliases_resolve."""
+    assert engine.hebrew_alias("אפל") == ("AAPL", "Apple")
+    assert engine.hebrew_alias("בנק הפועלים") == ("POLI.TA", "Bank Hapoalim")
+    # The short form and the "בנק "-prefixed form both resolve (prefix stripped).
+    assert engine.hebrew_alias("פועלים") == ("POLI.TA", "Bank Hapoalim")
+    # Geresh/apostrophe variants are ignored: "נופר אנרג'י" == "נופר אנרגי".
+    assert engine.hebrew_alias("נופר אנרג'י") == ("NOFR.TA", "Nofar Energy")
+    # Surrounding whitespace is tidied.
+    assert engine.hebrew_alias("  אפל  ") == ("AAPL", "Apple")
+    # A non-alias (English ticker) returns None, so the normal English/ticker
+    # search path is left completely untouched.
+    assert engine.hebrew_alias("AAPL") is None
+    # "קבוצת " is stripped, so the group form matches the short form.
+    assert engine.normalize_hebrew("קבוצת דלק") == engine.normalize_hebrew("דלק") == "דלק"
+    print("      hebrew alias lookup: אפל->AAPL, בנק הפועלים->POLI.TA, geresh OK")
+
+
 def main():
     print("Running app display tests (no network)...\n")
     results = [
@@ -208,6 +235,8 @@ def main():
               expect_format_metric_by_fmt),
         check("volume panel is taller (200) with SI y-ticks and a zero baseline",
               expect_volume_panel_readable),
+        check("hebrew alias lookup maps Hebrew names to tickers (no network)",
+              expect_hebrew_alias_lookup),
     ]
 
     passed = sum(results)

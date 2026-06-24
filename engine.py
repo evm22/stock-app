@@ -221,6 +221,88 @@ def _quick_resolve(symbol):
         return None
 
 
+# --- Hebrew-input search support -----------------------------------------
+#
+# Yahoo's search does NOT understand Hebrew, so "אפל" or "טבע" return nothing.
+# This curated map lets common Hebrew names (and a few spelling variants) resolve
+# to the right ticker. Several Hebrew variants may point to the same target.
+# English/ticker search is unchanged — this only ADDS a lookup (see find_tickers).
+#
+# Each value is (preferred_ticker, english_name). english_name is the fallback we
+# hand to Yahoo's search if the preferred ticker ever stops resolving.
+HEBREW_ALIASES = {
+    # --- US giants (Yahoo has these; we just bridge the Hebrew spelling) ---
+    "אפל": ("AAPL", "Apple"),
+    "מיקרוסופט": ("MSFT", "Microsoft"),
+    "נבידיה": ("NVDA", "Nvidia"),
+    "אנבידיה": ("NVDA", "Nvidia"),
+    "גוגל": ("GOOGL", "Alphabet"),
+    "אלפבית": ("GOOGL", "Alphabet"),
+    "אמזון": ("AMZN", "Amazon"),
+    "טסלה": ("TSLA", "Tesla"),
+    "מטא": ("META", "Meta"),
+    "פייסבוק": ("META", "Meta"),
+    # --- Israeli (TASE) — best-guess tickers, verified by the test suite ---
+    "טבע": ("TEVA.TA", "Teva"),
+    "פועלים": ("POLI.TA", "Bank Hapoalim"),
+    "בנק הפועלים": ("POLI.TA", "Bank Hapoalim"),
+    "לאומי": ("LUMI.TA", "Bank Leumi"),
+    "בנק לאומי": ("LUMI.TA", "Bank Leumi"),
+    "מזרחי": ("MZTF.TA", "Mizrahi Tefahot"),
+    "מזרחי טפחות": ("MZTF.TA", "Mizrahi Tefahot"),
+    "מגדל": ("MGDL.TA", "Migdal Insurance"),
+    "הראל": ("HARL.TA", "Harel Insurance"),
+    "כלל": ("CLIS.TA", "Clal Insurance"),
+    "כלל ביטוח": ("CLIS.TA", "Clal Insurance"),
+    "מנורה": ("MMHD.TA", "Menora Mivtachim"),
+    "מנורה מבטחים": ("MMHD.TA", "Menora Mivtachim"),
+    "אלביט": ("ESLT.TA", "Elbit Systems"),
+    "אלביט מערכות": ("ESLT.TA", "Elbit Systems"),
+    "טאואר": ("TSEM.TA", "Tower Semiconductor"),
+    "שטראוס": ("STRS.TA", "Strauss Group"),
+    "אל על": ("ELAL.TA", "El Al"),
+    "דלק": ("DLEKG.TA", "Delek Group"),
+    "קבוצת דלק": ("DLEKG.TA", "Delek Group"),
+    "נופר": ("NOFR.TA", "Nofar Energy"),
+    "נופר אנרג'י": ("NOFR.TA", "Nofar Energy"),
+    # NOTE: "ארית" (Arit Industries) was dropped — Yahoo Finance has no listing
+    # for it under any ticker/name, so it could never resolve. Re-add with a
+    # verified .TA symbol if Yahoo ever lists it.
+}
+
+# Geresh / apostrophe variants we drop so "נופר אנרג'י" == "נופר אנרגי".
+_GERESH_CHARS = ("'", "׳", "’", "`")  # ' (ASCII), ׳ (geresh), ’, `
+
+
+def normalize_hebrew(q: str) -> str:
+    """Normalize a query for Hebrew-alias matching:
+
+    - trims and lower-cases (a no-op for Hebrew letters, but tidies Latin text);
+    - drops geresh/apostrophe variants (', ׳, ’);
+    - collapses internal whitespace;
+    - strips a leading "בנק "/"קבוצת " so "בנק הפועלים" also matches "הפועלים".
+    """
+    s = (q or "").strip().lower()
+    for ch in _GERESH_CHARS:
+        s = s.replace(ch, "")
+    s = " ".join(s.split())
+    for prefix in ("בנק ", "קבוצת "):
+        if s.startswith(prefix):
+            s = s[len(prefix):].strip()
+            break
+    return s
+
+
+# Pre-normalized view of the alias keys, built once, for O(1) lookup.
+_HEBREW_ALIASES_NORM = {normalize_hebrew(k): v for k, v in HEBREW_ALIASES.items()}
+
+
+def hebrew_alias(query: str):
+    """Return (preferred_ticker, english_name) if `query` matches a curated Hebrew
+    alias (after normalization), else None. Pure dict logic — no network."""
+    return _HEBREW_ALIASES_NORM.get(normalize_hebrew(query))
+
+
 def find_tickers(query: str, max_results: int = 6):
     """
     Turn a free-text query into a list of candidate tickers, so the UI can let
@@ -250,6 +332,26 @@ def find_tickers(query: str, max_results: int = 6):
         if key and key not in seen:
             seen.add(key)
             matches.append(TickerMatch(key, name or key, exchange or "", ""))
+
+    # 0) Hebrew alias lookup FIRST — Yahoo's search can't read Hebrew, so without
+    #    this, "אפל"/"טבע" return nothing. A matched alias is added before any
+    #    other source so it becomes the default candidate.
+    alias = hebrew_alias(q)
+    if alias:
+        preferred_ticker, english_name = alias
+        resolved = _quick_resolve(preferred_ticker)
+        if resolved:
+            add(resolved.symbol, resolved.name, resolved.exchange)
+        else:
+            # Preferred ticker didn't resolve (e.g. a TASE symbol changed) — fall
+            # back to a Yahoo search on the English name so we still find it.
+            try:
+                for r in yf.Search(english_name, max_results=max_results).quotes:
+                    add(r.get("symbol"),
+                        r.get("shortname") or r.get("longname"),
+                        r.get("exchange"))
+            except Exception:
+                pass
 
     # 1) Yahoo text search — skipped for a bare number (its number search is
     #    unreliable and returns unrelated funds).

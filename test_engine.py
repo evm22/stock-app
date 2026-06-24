@@ -17,6 +17,14 @@ connection and an English (non-Hebrew) folder path for it to work locally.
 import sys
 
 import pandas as pd
+import yfinance as yf  # for the Hebrew-alias English-name fallback search
+
+# The Hebrew-alias test prints non-ASCII (Hebrew keys); keep stdout from crashing
+# on a Windows console whose encoding can't represent it.
+try:
+    sys.stdout.reconfigure(errors="replace")
+except Exception:
+    pass
 
 from engine import (
     get_stock_quote,
@@ -36,6 +44,8 @@ from engine import (
     HorizonVerdict,
     WeightedSignal,
     AnalystConsensus,
+    HEBREW_ALIASES,
+    _quick_resolve,
     VERDICT_LABELS,
     HORIZONS,
     RANGES,
@@ -334,6 +344,58 @@ def expect_find_number_unresolvable(number):
         f"expected no matches for bare number {number!r}, got {[m.symbol for m in matches]}"
 
 
+def expect_hebrew_aliases_resolve():
+    """Every curated Hebrew alias must resolve to a LIVE match: either its
+    preferred ticker resolves, or a Yahoo search on its English name returns at
+    least one result. This is the guard that no dead ticker ships.
+
+    Prints any hard failures, and a 'SUGGESTED FIX' line whenever the preferred
+    ticker is dead but the English-name search turns up a valid .TA symbol — so
+    the map can be corrected rather than guessed.
+    """
+    # Collapse to unique targets: the english_name + Hebrew keys per ticker.
+    targets, keys_for = {}, {}
+    for heb, (ticker, eng) in HEBREW_ALIASES.items():
+        targets[ticker] = eng
+        keys_for.setdefault(ticker, []).append(heb)
+
+    failures = []      # (ticker, english, hebrew_keys) — resolved to NOTHING
+    suggestions = []   # (hebrew_keys, bad_ticker, suggested_symbol)
+
+    for ticker, eng in sorted(targets.items()):
+        hebs = ", ".join(keys_for[ticker])
+        if _quick_resolve(ticker):
+            continue  # preferred ticker is live — all good
+        # Preferred ticker is dead. Try the English-name search fallback.
+        try:
+            results = yf.Search(eng, max_results=8).quotes
+        except Exception:
+            results = []
+        # Surface a live .TA from the search as a SUGGESTED FIX for the map.
+        for r in results:
+            sym = (r.get("symbol") or "").upper()
+            if sym.endswith(".TA") and _quick_resolve(sym):
+                suggestions.append((hebs, ticker, sym))
+                break
+        if not results:
+            failures.append((ticker, eng, hebs))
+
+    if suggestions:
+        print("\n  SUGGESTED FIX (preferred ticker dead, but a live .TA was found):")
+        for hebs, bad, good in suggestions:
+            print(f"    {hebs}: {bad} -> {good}")
+    if failures:
+        print("\n  FAILING ALIASES (neither the ticker nor the English search resolved):")
+        for ticker, eng, hebs in failures:
+            print(f"    {hebs}: {ticker} ({eng})")
+
+    print(f"      hebrew aliases: {len(targets)} targets checked, "
+          f"{len(failures)} failed, {len(suggestions)} suggested fix(es)")
+    assert not failures, (
+        f"{len(failures)} Hebrew alias(es) resolved to nothing: "
+        + "; ".join(f"{h} -> {t}" for t, e, h in failures))
+
+
 ANALYST_LABELS = ["Strong Buy", "Buy", "Hold", "Underperform", "Sell", "Strong Sell"]
 
 
@@ -623,6 +685,9 @@ def main():
                          lambda: expect_find_includes_ta("TEVA.TA", "TEVA.TA", "Teva")))
     results.append(check("bare TASE number 444018 is unresolvable",
                          lambda: expect_find_number_unresolvable("444018")))
+    # Hebrew-input search: every curated alias must resolve to a live ticker.
+    results.append(check("Hebrew aliases all resolve to a live match",
+                         lambda: expect_hebrew_aliases_resolve()))
 
     # Step 5: analyst consensus (covered, uncovered, and invalid).
     for symbol in ["AAPL", "TEVA"]:
