@@ -265,9 +265,55 @@ HEBREW_ALIASES = {
     "קבוצת דלק": ("DLEKG.TA", "Delek Group"),
     "נופר": ("NOFR.TA", "Nofar Energy"),
     "נופר אנרג'י": ("NOFR.TA", "Nofar Energy"),
-    # NOTE: "ארית" (Arit Industries) was dropped — Yahoo Finance has no listing
-    # for it under any ticker/name, so it could never resolve. Re-add with a
-    # verified .TA symbol if Yahoo ever lists it.
+    # --- More TASE names (round 2) — best-guess tickers, VERIFIED by the test
+    #     suite (expect_hebrew_aliases_resolve). Do not trust blindly. ---
+    "כיל": ("ICL.TA", "ICL Group"),
+    "כימיקלים לישראל": ("ICL.TA", "ICL Group"),
+    "נייס": ("NICE.TA", "Nice"),
+    "נובה": ("NVMI.TA", "Nova"),
+    "קמטק": ("CAMT.TA", "Camtek"),
+    "בזק": ("BEZQ.TA", "Bezeq"),
+    "פרטנר": ("PTNR.TA", "Partner Communications"),
+    "סלקום": ("CEL.TA", "Cellcom"),
+    "שופרסל": ("SAE.TA", "Shufersal"),
+    "רמי לוי": ("RMLI.TA", "Rami Levy"),
+    "פז": ("PAZ.TA", "Paz Retail and Energy"),
+    "פז נפט": ("PAZ.TA", "Paz Retail and Energy"),
+    "דיסקונט": ("DSCT.TA", "Israel Discount Bank"),
+    "בנק דיסקונט": ("DSCT.TA", "Israel Discount Bank"),
+    "הבינלאומי": ("FIBI.TA", "First International Bank"),
+    "בנק הבינלאומי": ("FIBI.TA", "First International Bank"),
+    "מליסרון": ("MLSR.TA", "Melisron"),
+    "עזריאלי": ("AZRG.TA", "Azrieli Group"),
+    "קבוצת עזריאלי": ("AZRG.TA", "Azrieli Group"),
+    "אמות": ("AMOT.TA", "Amot Investments"),
+    "אמות השקעות": ("AMOT.TA", "Amot Investments"),
+    "שיכון ובינוי": ("SKBN.TA", "Shikun & Binui"),
+    "אשטרום": ("ASHG.TA", "Ashtrom Group"),
+    "קבוצת אשטרום": ("ASHG.TA", "Ashtrom Group"),
+    "אנרג'יקס": ("ENRG.TA", "Energix"),
+    "נאוויטס": ("NVPT.TA", "Navitas Petroleum"),
+    "נאוויטס פטרוליום": ("NVPT.TA", "Navitas Petroleum"),
+    "ישראמקו": ("ISRA.TA", "Isramco"),
+    "רציו": ("RATI.TA", "Ratio"),
+    "אורמת": ("ORA.TA", "Ormat Technologies"),
+    "אורמת טכנולוגיות": ("ORA.TA", "Ormat Technologies"),
+    "מבטח שמיר": ("MISH.TA", "Mivtach Shamir"),
+    "פיניקס": ("PHOE.TA", "Phoenix Holdings"),
+    "הפניקס": ("PHOE.TA", "Phoenix Holdings"),
+    "ביג": ("BIG.TA", "Big Shopping Centers"),
+    "ביג מרכזי קניות": ("BIG.TA", "Big Shopping Centers"),
+    "אלוני חץ": ("ALHE.TA", "Alony Hetz"),
+    "טפרון": ("TDRN.TA", "Tadiran"),
+    "פתאל": ("FTAL.TA", "Fattal Holdings"),
+    # NOTE: a few candidates were dropped because their ticker is dead on Yahoo
+    # and no live replacement applies (re-add with a verified .TA if that changes):
+    #   - "ארית" (Arit Industries): no Yahoo listing under any ticker/name.
+    #   - "גזית גלוב": renamed to G City (GCT.TA); dropped per request.
+    #   - "מזור רובוטיקה" (Mazor Robotics): delisted after the 2018 Medtronic
+    #     acquisition — no standalone ticker exists.
+    # "פז" was corrected from the dead PZOL.TA to the live PAZ.TA (Paz Retail
+    # and Energy).
 }
 
 # Geresh / apostrophe variants we drop so "נופר אנרג'י" == "נופר אנרגי".
