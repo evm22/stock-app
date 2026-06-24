@@ -288,6 +288,9 @@ HEBREW_ALIASES = {
     "קבוצת עזריאלי": ("AZRG.TA", "Azrieli Group"),
     "אמות": ("AMOT.TA", "Amot Investments"),
     "אמות השקעות": ("AMOT.TA", "Amot Investments"),
+    "גזית": ("GCT.TA", "G City"),
+    "גזית גלוב": ("GCT.TA", "G City"),
+    "ג'י סיטי": ("GCT.TA", "G City"),
     "שיכון ובינוי": ("SKBN.TA", "Shikun & Binui"),
     "אשטרום": ("ASHG.TA", "Ashtrom Group"),
     "קבוצת אשטרום": ("ASHG.TA", "Ashtrom Group"),
@@ -309,11 +312,10 @@ HEBREW_ALIASES = {
     # NOTE: a few candidates were dropped because their ticker is dead on Yahoo
     # and no live replacement applies (re-add with a verified .TA if that changes):
     #   - "ארית" (Arit Industries): no Yahoo listing under any ticker/name.
-    #   - "גזית גלוב": renamed to G City (GCT.TA); dropped per request.
     #   - "מזור רובוטיקה" (Mazor Robotics): delisted after the 2018 Medtronic
     #     acquisition — no standalone ticker exists.
     # "פז" was corrected from the dead PZOL.TA to the live PAZ.TA (Paz Retail
-    # and Energy).
+    # and Energy); "גזית" now points at GCT.TA (Gazit Globe renamed to G City).
 }
 
 # Geresh / apostrophe variants we drop so "נופר אנרג'י" == "נופר אנרגי".
