@@ -111,6 +111,14 @@ def expect_percent_mode_adds_baseline_and_axis():
     ys = [row.get("y") for row in _layer_values(spec, baseline)]
     assert any(abs(y - base) < 1e-9 for y in ys if y is not None), \
         f"baseline should sit at the start close {base}, got {ys}"
+    # The baseline only DRAWS the dashed rule; it must contribute NO axis of its
+    # own (axis=None). Otherwise resolve_scale(y="independent") renders a second,
+    # duplicate right-hand PRICE axis on top of the "% change" axis -- two sets of
+    # labels overlapping. axis=None keeps its scale (so it stays aligned) but
+    # suppresses the extra axis.
+    assert "axis" in baseline["encoding"]["y"] \
+        and baseline["encoding"]["y"]["axis"] is None, \
+        "baseline y must set axis=None so it adds no duplicate right-hand axis"
 
     # Right axis: '% change', oriented right, domain straddling 0%.
     right_y = layers[2]["encoding"]["y"]

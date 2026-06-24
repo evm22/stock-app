@@ -217,7 +217,7 @@ def make_candlestick(df, pct_first_close=None):
     baseline = (
         alt.Chart(pd.DataFrame({"y": [pct_first_close]}))
         .mark_rule(strokeDash=[4, 4], color="#9e9e9e", opacity=0.7, size=1)
-        .encode(y=alt.Y("y:Q", scale=price_scale))
+        .encode(y=alt.Y("y:Q", scale=price_scale, axis=None))
     )
 
     # Secondary right-hand "% change" axis, linked to the left price axis. We map
