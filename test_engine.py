@@ -429,6 +429,38 @@ def expect_app_renders_without_gemini():
           f"no AI box ({len(buttons)} buttons total)")
 
 
+def expect_app_holders_no_data():
+    """When holder data is empty, the app still renders the 'Notable institutional
+    holders' section with a muted 'no data' line and no exception. We FORCE empty
+    holders (monkeypatch + cache clear) so this never depends on live Yahoo holder
+    data. (Reuses the AppTest harness; other AAPL data is live.)"""
+    os.environ.setdefault("STOCKAPP_DISABLE_BROWSER_STORAGE", "1")
+    import engine as eng
+    import streamlit as st
+    real = eng.get_institutional_holders
+    eng.get_institutional_holders = lambda symbol, *a, **k: eng.HoldersResult(
+        False, (symbol or "").strip().upper())
+    try:
+        st.cache_data.clear()  # so load_holders re-runs with the patched engine
+        from streamlit.testing.v1 import AppTest
+        at = AppTest.from_file("app.py", default_timeout=90)
+        at.run()
+        at.text_input(key="search_box").set_value("AAPL").run()
+        if len(at.selectbox) >= 1:
+            at.selectbox[0].set_value("AAPL").run()
+        assert not at.exception, f"app raised with empty holders: {at.exception}"
+        subs = [getattr(s, "value", "") for s in at.subheader]
+        assert "Notable institutional holders" in subs, \
+            "the holders section header should render"
+        caps = [getattr(c, "value", "") for c in at.caption]
+        assert any("No institutional holder data" in c for c in caps), \
+            "the muted no-data line should show when holders are empty"
+        print("      holders: 'no data' line renders when empty; no exception")
+    finally:
+        eng.get_institutional_holders = real
+        st.cache_data.clear()
+
+
 def expect_hebrew_aliases_resolve():
     """Every curated Hebrew alias must resolve to a LIVE match: either its
     preferred ticker resolves, or a Yahoo search on its English name returns at
@@ -782,6 +814,10 @@ def main():
     # The optional Gemini layer is skipped silently when no key is configured.
     results.append(check("app renders normally with no Gemini key (box absent)",
                          lambda: expect_app_renders_without_gemini()))
+
+    # Institutional-holders section renders a graceful 'no data' line when empty.
+    results.append(check("app shows holders 'no data' line when empty (no crash)",
+                         lambda: expect_app_holders_no_data()))
 
     # Step 5: analyst consensus (covered, uncovered, and invalid).
     for symbol in ["AAPL", "TEVA"]:

@@ -305,6 +305,29 @@ def expect_gemini_optional_offline():
           "garbage never raises")
 
 
+def expect_holders_resilient_offline():
+    """get_institutional_holders needs no network for empty input and never raises
+    if yfinance fails — it returns an empty HoldersResult (found=False)."""
+    for bad in (None, "", "   "):
+        r = engine.get_institutional_holders(bad)
+        assert r.found is False, f"{bad!r} should be found=False"
+        assert r.top_holders == [] and r.institutions_pct_held is None
+        assert r.institutions_count is None
+
+    # If yfinance itself blows up, we still return an empty result (no raise).
+    real_ticker = engine.yf.Ticker
+    def _boom(*args, **kwargs):
+        raise RuntimeError("network down")
+    try:
+        engine.yf.Ticker = _boom
+        r = engine.get_institutional_holders("AAPL")
+        assert r.found is False and r.symbol == "AAPL"
+        assert r.top_holders == [] and r.institutions_pct_held is None
+    finally:
+        engine.yf.Ticker = real_ticker
+    print("      holders: empty input + yfinance failure -> empty result, no raise")
+
+
 def main():
     print("Running app display tests (no network)...\n")
     results = [
@@ -324,6 +347,8 @@ def main():
               expect_classify_metric),
         check("gemini explain_verdict is optional/offline-safe (no key, no network)",
               expect_gemini_optional_offline),
+        check("institutional holders is resilient (empty/garbage, no network)",
+              expect_holders_resilient_offline),
     ]
 
     passed = sum(results)

@@ -1048,6 +1048,124 @@ def get_stock_technicals(ticker: str) -> MetricGroup:
     return MetricGroup(True, display, currency, metrics)
 
 
+# --- Institutional holders (real 13F data, never the LLM) -----------------
+#
+# Factual quarterly-filing holder data straight from yfinance. Many small or
+# foreign tickers (incl. some .TA) simply have none — that's expected, returned
+# as an empty result (found=False), never an error.
+
+@dataclass
+class InstitutionalHolder:
+    """One institutional holder row from yfinance's holders table."""
+    name: str
+    shares: Optional[int] = None
+    pct_held: Optional[float] = None      # fraction (0.0779 = 7.79%)
+    value: Optional[float] = None         # reported position value (currency)
+    date_reported: str = ""               # ISO date string, e.g. "2026-03-31"
+
+
+@dataclass
+class HoldersResult:
+    """Normalized institutional-holders result.
+
+    `found` is False when yfinance gives us nothing usable (so the UI shows a
+    gentle 'no data' note instead of an empty table).
+    """
+    found: bool
+    symbol: str
+    institutions_pct_held: Optional[float] = None   # fraction of shares (major_holders)
+    institutions_count: Optional[int] = None        # number of institutions
+    top_holders: list = field(default_factory=list)  # list[InstitutionalHolder]
+
+
+def _holder_int(value):
+    """Coerce a holders-table cell to int, or None."""
+    try:
+        return int(value) if _is_number(value) else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _holder_float(value):
+    """Coerce a holders-table cell to float, or None."""
+    return float(value) if _is_number(value) else None
+
+
+def _holder_date(value):
+    """Render a 'Date Reported' cell (Timestamp/date/str) as an ISO date string."""
+    if value is None:
+        return ""
+    try:
+        if hasattr(value, "strftime"):
+            return value.strftime("%Y-%m-%d")
+        text = str(value).strip()
+        return text[:10] if text else ""
+    except Exception:
+        return ""
+
+
+def get_institutional_holders(symbol, top_n: int = 10) -> HoldersResult:
+    """
+    The notable institutional holders of a stock, from yfinance's 13F-sourced
+    tables (no LLM, no guessing). Returns a HoldersResult:
+      - top_holders: up to `top_n` InstitutionalHolder rows (name, shares,
+        % held, value, date reported),
+      - institutions_pct_held / institutions_count: the summary from
+        major_holders, when available.
+
+    Resilient by design: any missing data or yfinance error yields an empty
+    result (found=False), never an exception. Many small/foreign tickers have
+    no holder data at all — that is expected, not an error.
+    """
+    display = (symbol or "").strip().upper()
+    result = HoldersResult(False, display)
+    if not display:
+        return result
+
+    try:
+        ticker = yf.Ticker(symbol)
+
+        # Summary: % of shares held by institutions (and how many institutions).
+        try:
+            major = ticker.major_holders
+            if (major is not None and not major.empty
+                    and "Value" in major.columns):
+                if "institutionsPercentHeld" in major.index:
+                    result.institutions_pct_held = _holder_float(
+                        major.loc["institutionsPercentHeld", "Value"])
+                if "institutionsCount" in major.index:
+                    result.institutions_count = _holder_int(
+                        major.loc["institutionsCount", "Value"])
+        except Exception:
+            pass
+
+        # The top institutional holders table.
+        try:
+            inst = ticker.institutional_holders
+            if (inst is not None and not inst.empty
+                    and "Holder" in inst.columns):
+                for _, row in inst.head(top_n).iterrows():
+                    name = row.get("Holder")
+                    if not (isinstance(name, str) and name.strip()):
+                        continue
+                    result.top_holders.append(InstitutionalHolder(
+                        name=name.strip(),
+                        shares=_holder_int(row.get("Shares")),
+                        pct_held=_holder_float(row.get("pctHeld")),
+                        value=_holder_float(row.get("Value")),
+                        date_reported=_holder_date(row.get("Date Reported")),
+                    ))
+        except Exception:
+            pass
+
+        result.found = bool(result.top_holders) or (
+            result.institutions_pct_held is not None)
+        return result
+    except Exception:
+        # Any unexpected failure -> behave as 'no data', never raise.
+        return HoldersResult(False, display)
+
+
 # --- Color-coding metric tiles (rules of thumb, NOT financial advice) ------
 #
 # classify_metric() returns "good" / "neutral" / "bad" for metrics that carry a

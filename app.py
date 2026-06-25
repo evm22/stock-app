@@ -72,6 +72,12 @@ def load_analyst(symbol):
     return engine.get_analyst_consensus(symbol)
 
 
+@st.cache_data(ttl=600)
+def load_holders(symbol):
+    """Cached wrapper for the institutional holders (real 13F data)."""
+    return engine.get_institutional_holders(symbol)
+
+
 # Colour for each verdict label, on a red (bad) -> green (good) scale.
 # These names are Streamlit's built-in markdown colours (e.g. :green[...]).
 VERDICT_COLORS = {
@@ -716,6 +722,47 @@ if symbol:
             f"(https://finance.yahoo.com/quote/{symbol}/analysis). "
             "Per-site analyst scores (e.g. TipRanks) are often paywalled."
         )
+
+        # --- Notable institutional holders (real 13F filing data) -------
+        st.divider()
+        st.subheader("Notable institutional holders")
+        try:
+            holders = load_holders(symbol)
+        except Exception:
+            holders = None
+
+        if holders is None or not holders.found:
+            st.caption("_No institutional holder data available for this stock._")
+        else:
+            if holders.institutions_pct_held is not None:
+                pct = holders.institutions_pct_held * 100
+                across = (f" across {holders.institutions_count:,} institutions"
+                          if holders.institutions_count else "")
+                st.markdown(f"**{pct:.1f}%** of shares held by institutions{across}.")
+
+            if holders.top_holders:
+                table = pd.DataFrame([{
+                    "Holder": h.name,
+                    "Shares": f"{h.shares:,}" if h.shares is not None else "n/a",
+                    "% held": (f"{h.pct_held * 100:.2f}%"
+                               if h.pct_held is not None else "n/a"),
+                    "Date reported": h.date_reported or "n/a",
+                } for h in holders.top_holders])
+                st.dataframe(table, hide_index=True, width="stretch")
+                st.caption(
+                    "Top institutional holders from quarterly **13F filings** "
+                    "(lagged up to ~45 days), mostly large asset managers (e.g. "
+                    "Vanguard, BlackRock). This is **not** a real-time or "
+                    "famous-investor view, and **not financial advice**."
+                )
+            else:
+                # Summary % available but no named-holder breakdown (common for
+                # smaller / foreign listings).
+                st.caption(
+                    "Institutional ownership summary from quarterly **13F "
+                    "filings** (lagged up to ~45 days); a named holder breakdown "
+                    "isn't available for this stock. **Not financial advice**."
+                )
 
         # --- AI analysis (OPTIONAL; Gemini, button-triggered) -----------
         # Two depths, ON DEMAND. We NEVER auto-call Gemini — the user clicks a
