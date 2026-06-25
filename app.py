@@ -23,6 +23,23 @@ import gemini_helper  # OPTIONAL Gemini explanation layer (no-op without a key)
 # Basic page configuration (title shown in the browser tab, etc.).
 st.set_page_config(page_title="Stock Analysis App", page_icon="📈")
 
+# --- Compact metric tiles (PURE STYLING) ---------------------------------
+# st.metric has no built-in "small" size, so we shrink the value font (~2rem ->
+# 1.25rem, roughly 62%) and the label, and tighten vertical spacing, so the
+# Fundamentals/Technicals tile grids read more densely. This only restyles
+# st.metric — values, color dots, "?" tooltips and n/a handling are untouched.
+st.markdown(
+    """
+    <style>
+    [data-testid="stMetricValue"] { font-size: 1.25rem; line-height: 1.3; }
+    [data-testid="stMetricLabel"] { font-size: 0.85rem; }
+    [data-testid="stMetricLabel"] p { font-size: 0.85rem; }
+    [data-testid="stMetric"] { padding: 0.10rem 0rem; }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+
 
 # @st.cache_data remembers this function's result for each ticker, so when
 # Streamlit reruns the script (it reruns on every interaction) we reuse the
@@ -792,8 +809,8 @@ if symbol:
                 explanation = ai_cache[cache_key]
                 if explanation:
                     st.info(explanation)
-                    st.caption("AI-generated summary of the data above — "
-                               "not financial advice.")
+                    st.caption("AI-generated summary of this stock's data "
+                               "(shown across the other tabs) — not financial advice.")
                 else:
                     # Only AFTER a click: a small muted note. Never auto, never crash.
                     st.caption("_AI analysis unavailable._")
