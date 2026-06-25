@@ -33,6 +33,7 @@ import pandas as pd
 import engine
 import app
 import gemini_helper
+import famous_investors
 
 
 def check(description, test_function):
@@ -286,6 +287,46 @@ def expect_classify_metric():
           "45=bad), good/neutral/bad bands, descriptive keys uncolored")
 
 
+def expect_famous_investors_offline():
+    """get_famous_holders matches by ticker and is resilient — empty/garbage input
+    and EDGAR failures return [] (never raise). Fully offline (monkeypatched, no
+    live EDGAR)."""
+    # Empty / None symbol -> [] with NO network (short-circuits before any fetch).
+    assert famous_investors.get_famous_holders("", "id") == []
+    assert famous_investors.get_famous_holders(None, "id") == []
+
+    real = famous_investors._fund_holdings
+    try:
+        # Every fund's EDGAR fetch fails -> each is skipped, result [] (no raise).
+        famous_investors._HOLDINGS_CACHE.clear()
+        def _boom(cik, identity):
+            raise RuntimeError("EDGAR down")
+        famous_investors._fund_holdings = _boom
+        assert famous_investors.get_famous_holders("AAPL", "id") == []
+
+        # Matching logic with a FAKE holdings table (no network): AAPL is held,
+        # a bogus ticker is not.
+        fake = pd.DataFrame({
+            "Ticker": ["AAPL", "MSFT"],
+            "SharesPrnAmount": [1000, 2000],
+            "Value": [150000, 300000],
+        })
+        famous_investors._fund_holdings = lambda cik, identity: ("2026-03-31", fake)
+        hits = famous_investors.get_famous_holders("AAPL", "id")
+        assert len(hits) == len(famous_investors.FAMOUS_INVESTORS), \
+            f"every tracked fund (fake AAPL holding) should hit, got {len(hits)}"
+        first = hits[0]
+        assert {"name", "fund", "shares", "value", "period"} <= set(first)
+        assert first["shares"] == 1000 and first["value"] == 150000
+        assert first["period"] == "2026-03-31"
+        # A ticker none of them hold -> empty.
+        assert famous_investors.get_famous_holders("ZZZZ", "id") == []
+    finally:
+        famous_investors._fund_holdings = real
+        famous_investors._HOLDINGS_CACHE.clear()
+    print("      famous investors: ticker match + empty/garbage/EDGAR-fail -> safe")
+
+
 def expect_gemini_optional_offline():
     """The Gemini layer is optional and offline-safe: with no key it returns None
     immediately (no google-generativeai import, no network) for BOTH depths, and
@@ -349,6 +390,8 @@ def main():
               expect_gemini_optional_offline),
         check("institutional holders is resilient (empty/garbage, no network)",
               expect_holders_resilient_offline),
+        check("famous investors: ticker match + resilient (no network)",
+              expect_famous_investors_offline),
     ]
 
     passed = sum(results)

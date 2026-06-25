@@ -19,6 +19,7 @@ import streamlit as st
 
 import engine  # our pure-Python data engine (no Streamlit inside it)
 import gemini_helper  # OPTIONAL Gemini explanation layer (no-op without a key)
+import famous_investors  # famous-investor 13F holdings from SEC EDGAR (no key)
 
 # Basic page configuration (title shown in the browser tab, etc.).
 st.set_page_config(page_title="Stock Analysis App", page_icon="📈")
@@ -169,6 +170,20 @@ def get_gemini_key():
         return st.secrets.get("GEMINI_API_KEY", None)
     except Exception:
         return None
+
+
+# SEC requires a fair-use identity (name + email) on every request — this is NOT
+# a secret or login, so a sensible default in code is fine; secrets can override.
+_DEFAULT_EDGAR_IDENTITY = "Stock App contact@example.com"
+
+
+def get_edgar_identity():
+    """The SEC EDGAR fair-use identity string. Reads st.secrets["EDGAR_IDENTITY"]
+    if set, else a sensible default — works even with no secrets file."""
+    try:
+        return st.secrets.get("EDGAR_IDENTITY", _DEFAULT_EDGAR_IDENTITY)
+    except Exception:
+        return _DEFAULT_EDGAR_IDENTITY
 
 
 def _gemini_payload(symbol, verdict, company, technicals, analyst, divergence):
@@ -955,6 +970,51 @@ if symbol:
                             "filings** (lagged up to ~45 days); a named holder breakdown "
                             "isn't available for this stock. **Not financial advice**."
                         )
+
+            # Famous investors (real SEC 13F data; button-triggered so we never
+            # run ~10 EDGAR calls on page load). Cached per symbol for the session.
+            with st.expander("Famous investors holding this", expanded=False):
+                famous_cache = st.session_state.setdefault("_famous_cache", {})
+                requested = st.session_state.setdefault("_famous_requested", set())
+                if st.button("Check famous investors", key="famous_btn"):
+                    requested.add(symbol)
+
+                if symbol in requested:
+                    if symbol not in famous_cache:
+                        with st.spinner("Checking SEC 13F filings…"):
+                            try:
+                                famous_cache[symbol] = famous_investors.get_famous_holders(
+                                    symbol, get_edgar_identity())
+                            except Exception:
+                                famous_cache[symbol] = None  # error sentinel
+                    famous = famous_cache[symbol]
+
+                    if famous is None:
+                        st.caption("_Famous-investor data unavailable right now._")
+                    elif famous:
+                        ftable = pd.DataFrame([{
+                            "Investor": h["name"],
+                            "Fund": h["fund"],
+                            "Shares": (f"{h['shares']:,.0f}"
+                                       if h.get("shares") is not None else "n/a"),
+                            "Value": (f"{h['value']:,.0f}"
+                                      if h.get("value") is not None else "n/a"),
+                            "As of": h.get("period") or "n/a",
+                        } for h in famous])
+                        st.dataframe(ftable, hide_index=True, width="stretch")
+                        st.caption(
+                            "Tracked from quarterly **SEC 13F filings** (lagged up "
+                            "to ~45 days), **US-listed securities only**, across a "
+                            "curated ~10-investor list — not exhaustive, not "
+                            "real-time, and **not financial advice**."
+                        )
+                    else:
+                        st.caption("_None of the tracked investors report holding "
+                                   "this (or it's not a US-listed stock)._")
+                else:
+                    st.caption("Check a curated list of ~10 well-known investors "
+                               "(Buffett, Ackman, Burry, …) against their latest "
+                               "SEC 13F filing. US-listed stocks only.")
 
             with st.expander("Recent analyst actions (upgrades / downgrades)",
                              expanded=False):

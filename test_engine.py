@@ -472,6 +472,47 @@ def expect_app_holders_no_data():
         st.cache_data.clear()
 
 
+def expect_app_famous_no_fetch_on_load():
+    """The 'Famous investors holding this' expander + 'Check famous investors'
+    button render, and NOTHING fetches EDGAR on page load (only on click). A
+    tripwire monkeypatch makes any accidental fetch increment a counter — we
+    assert it stays 0, so the test never touches live EDGAR."""
+    os.environ.setdefault("STOCKAPP_DISABLE_BROWSER_STORAGE", "1")
+    import famous_investors as fi
+    called = {"n": 0}
+    real = fi.get_famous_holders
+
+    def _tripwire(*a, **k):
+        called["n"] += 1
+        return []
+
+    fi.get_famous_holders = _tripwire
+    try:
+        from streamlit.testing.v1 import AppTest
+        at = AppTest.from_file("app.py", default_timeout=90)
+        at.run()
+        at.text_input(key="search_box").set_value("AAPL").run()
+        if len(at.selectbox) >= 1:
+            at.selectbox[0].set_value("AAPL").run()
+        assert not at.exception, f"app raised: {at.exception}"
+
+        exp_labels = [getattr(e, "label", None)
+                      or getattr(getattr(e, "proto", None), "label", "")
+                      for e in at.expander]
+        assert "Famous investors holding this" in exp_labels, \
+            "the famous-investors expander should render"
+        btn_labels = [getattr(b, "label", None)
+                      or getattr(getattr(b, "proto", None), "label", "")
+                      for b in at.button]
+        assert any("Check famous investors" in (b or "") for b in btn_labels), \
+            "the 'Check famous investors' button should render"
+        assert called["n"] == 0, \
+            "must NOT fetch EDGAR on page load — only on a button click"
+        print("      famous investors: expander+button render; no EDGAR fetch on load")
+    finally:
+        fi.get_famous_holders = real
+
+
 def expect_hebrew_aliases_resolve():
     """Every curated Hebrew alias must resolve to a LIVE match: either its
     preferred ticker resolves, or a Yahoo search on its English name returns at
@@ -829,6 +870,10 @@ def main():
     # Institutional-holders section renders a graceful 'no data' line when empty.
     results.append(check("app shows holders 'no data' line when empty (no crash)",
                          lambda: expect_app_holders_no_data()))
+
+    # Famous-investors panel renders but never fetches EDGAR until clicked.
+    results.append(check("famous-investors panel renders, no fetch on load",
+                         lambda: expect_app_famous_no_fetch_on_load()))
 
     # Step 5: analyst consensus (covered, uncovered, and invalid).
     for symbol in ["AAPL", "TEVA"]:
