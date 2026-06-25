@@ -780,10 +780,10 @@ if symbol:
         disabled_help = "Add a Gemini API key to enable" if no_key else None
         col_quick, col_deep = st.columns(2)
         if col_quick.button("⚡ Quick take", key="ai_quick_btn", disabled=no_key,
-                            help=disabled_help, use_container_width=True):
+                            help=disabled_help, width="stretch"):
             ai_active[symbol] = "quick"
         if col_deep.button("🔍 Deep dive", key="ai_deep_btn", disabled=no_key,
-                           help=disabled_help, use_container_width=True):
+                           help=disabled_help, width="stretch"):
             ai_active[symbol] = "deep"
 
         # Show the most-recently-requested depth for this symbol (if any). The
