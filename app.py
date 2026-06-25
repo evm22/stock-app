@@ -543,6 +543,7 @@ if symbol:
     if quote is None or not quote.found:
         st.error("Couldn't load that ticker — please try another.")
     else:
+        # ---- Pinned header (stays visible above the tabs) --------------
         # Company name as a small heading.
         st.subheader(quote.name)
 
@@ -573,114 +574,375 @@ if symbol:
             key="wl_toggle", on_click=_toggle_watchlist, args=(symbol,),
         )
 
-        # --- Verdict (rule-based, three time horizons) ------------------
-        st.divider()
-        st.subheader("Verdict")
+        # ---- Load everything once (cached); each tab renders its slice. -
+        # PURE LAYOUT: these are the same cached calls as before, just hoisted
+        # so every tab (and the debug panel) can read the data it needs. No
+        # computation changes — Streamlit runs all tab bodies each rerun anyway.
         try:
             verdict = load_verdict(symbol)
         except Exception:
             verdict = None
-
-        if verdict is None or not verdict.found:
-            st.info("No verdict available for this ticker.")
-        else:
-            # Three colour-coded tiles, short -> long horizon.
-            columns = st.columns(len(engine.HORIZONS))
-            for column, horizon in zip(columns, engine.HORIZONS):
-                hv = verdict.horizons.get(horizon)
-                column.markdown(f"**{HORIZON_NAMES.get(horizon, horizon)}**")
-                if hv is None or not hv.enough_data:
-                    column.info("Not enough data")
-                    continue
-                color = VERDICT_COLORS.get(hv.label, "gray")
-                column.markdown(f":{color}[**{hv.label}**]")
-                # Score as a metric so it carries a "?" tooltip.
-                column.metric("Score", f"{hv.score:.0f}/100",
-                              help=engine.HELP_TEXTS.get("verdict_score"),
-                              label_visibility="collapsed")
-                column.progress(int(round(hv.score)))
-
-            st.caption(
-                "⚠️ Automated, rule-based opinion from public data — "
-                "**not financial advice.** The three horizons re-weight the "
-                "**same current data** differently; they do **not** predict the future."
-            )
-
-            # Transparent per-horizon breakdown — one tab each.
-            with st.expander("Why this verdict? (how it was calculated)"):
-                tabs = st.tabs([HORIZON_NAMES.get(h, h) for h in engine.HORIZONS])
-                for tab, horizon in zip(tabs, engine.HORIZONS):
-                    hv = verdict.horizons.get(horizon)
-                    with tab:
-                        if hv is None or not hv.enough_data:
-                            st.info(hv.reason if hv else "Not enough data.")
-                            continue
-                        st.caption(
-                            f"Weighted score {hv.score:.1f}/100 (50 = neutral). "
-                            "Each signal: base points × horizon weight = contribution."
-                        )
-                        for ws in hv.breakdown:
-                            base_sign = "+" if ws.points > 0 else ""  # minus self-prints
-                            w_sign = "+" if ws.weighted > 0 else ""
-                            st.write(
-                                f"- **{ws.name}** — {ws.measured} | "
-                                f"base {base_sign}{ws.points} × weight {ws.weight:.1f} "
-                                f"= **{w_sign}{ws.weighted:.1f}**"
-                            )
-
-        # --- Our verdict vs analyst consensus (Step 5) ------------------
-        st.divider()
-        st.subheader("Our verdict vs Wall Street")
         try:
             analyst = load_analyst(symbol)
         except Exception:
             analyst = None
+        try:
+            holders = load_holders(symbol)
+        except Exception:
+            holders = None
+        try:
+            company = load_company(symbol)
+        except Exception:
+            company = None
+        try:
+            technicals = load_technicals(symbol)
+        except Exception:
+            technicals = None
+        # Context for the color cues: the stock's sector (for sector-aware
+        # valuation thresholds) and its current price (for price-vs-MA).
+        sector = None
+        if company is not None and company.found:
+            sm = company.metrics.get("sector")
+            sector = sm.value if (sm and sm.available) else None
+        metric_context = {"sector": sector, "price": quote.price}
 
-        if analyst is None or not analyst.found or not analyst.has_coverage:
-            st.info("No analyst coverage for this stock (common for smaller and "
-                    "Tel-Aviv listings) — nothing to compare against here.")
-        else:
-            col_ours, col_street = st.columns(2)
-            with col_ours:
-                st.markdown("**Our verdict (1-year)**")
-                hv = (verdict.horizons.get("1Y")
-                      if verdict is not None and verdict.found else None)
-                if hv is not None and hv.enough_data:
-                    c = VERDICT_COLORS.get(hv.label, "gray")
-                    st.markdown(f":{c}[**{hv.label}**]")
-                    st.metric("Score", f"{hv.score:.0f}/100",
-                              help=engine.HELP_TEXTS.get("verdict_score"),
-                              label_visibility="collapsed")
+        tab_overview, tab_ai, tab_charts, tab_fund, tab_tech, tab_own = st.tabs(
+            ["Overview", "AI analysis", "Charts", "Fundamentals", "Technicals",
+             "Ownership"])
+
+        # ======================= Overview =======================
+        with tab_overview:
+            with st.expander("Verdict", expanded=True):
+                if verdict is None or not verdict.found:
+                    st.info("No verdict available for this ticker.")
                 else:
-                    st.markdown("n/a")
-                st.caption("rule-based, from price + fundamentals")
-            with col_street:
-                st.markdown("**Analyst consensus**")
-                c = ANALYST_COLORS.get(analyst.label, "gray")
-                st.markdown(f":{c}[**{analyst.label}**]")
-                if analyst.mean is not None:
-                    st.metric("Mean rating", f"{analyst.mean:.2f}/5",
-                              help=engine.HELP_TEXTS.get("analyst_mean"),
-                              label_visibility="collapsed")
-                    st.caption(f"from {analyst.num_analysts or '?'} analysts")
+                    # Three colour-coded tiles, short -> long horizon.
+                    columns = st.columns(len(engine.HORIZONS))
+                    for column, horizon in zip(columns, engine.HORIZONS):
+                        hv = verdict.horizons.get(horizon)
+                        column.markdown(f"**{HORIZON_NAMES.get(horizon, horizon)}**")
+                        if hv is None or not hv.enough_data:
+                            column.info("Not enough data")
+                            continue
+                        color = VERDICT_COLORS.get(hv.label, "gray")
+                        column.markdown(f":{color}[**{hv.label}**]")
+                        # Score as a metric so it carries a "?" tooltip.
+                        column.metric("Score", f"{hv.score:.0f}/100",
+                                      help=engine.HELP_TEXTS.get("verdict_score"),
+                                      label_visibility="collapsed")
+                        column.progress(int(round(hv.score)))
 
-            # Mean price target vs current price (implied upside / downside).
-            if analyst.target_mean and analyst.current_price:
-                cur = analyst.currency or ""
-                up = analyst.upside_pct or 0.0
-                arrow = "🔺" if up >= 0 else "🔻"
-                sign = "+" if up >= 0 else ""
-                st.write(
-                    f"**Mean price target:** {analyst.target_mean:,.2f} {cur} "
-                    f"({arrow} {sign}{up:.1f}% vs current {analyst.current_price:,.2f})"
+                    st.caption(
+                        "⚠️ Automated, rule-based opinion from public data — "
+                        "**not financial advice.** The three horizons re-weight the "
+                        "**same current data** differently; they do **not** predict the future."
+                    )
+
+                    # Transparent per-horizon breakdown. Rendered inline (Streamlit
+                    # forbids an expander inside an expander), one tab per horizon.
+                    st.markdown("**Why this verdict? (how it was calculated)**")
+                    horizon_tabs = st.tabs([HORIZON_NAMES.get(h, h)
+                                            for h in engine.HORIZONS])
+                    for htab, horizon in zip(horizon_tabs, engine.HORIZONS):
+                        hv = verdict.horizons.get(horizon)
+                        with htab:
+                            if hv is None or not hv.enough_data:
+                                st.info(hv.reason if hv else "Not enough data.")
+                                continue
+                            st.caption(
+                                f"Weighted score {hv.score:.1f}/100 (50 = neutral). "
+                                "Each signal: base points × horizon weight = contribution."
+                            )
+                            for ws in hv.breakdown:
+                                base_sign = "+" if ws.points > 0 else ""  # minus self-prints
+                                w_sign = "+" if ws.weighted > 0 else ""
+                                st.write(
+                                    f"- **{ws.name}** — {ws.measured} | "
+                                    f"base {base_sign}{ws.points} × weight {ws.weight:.1f} "
+                                    f"= **{w_sign}{ws.weighted:.1f}**"
+                                )
+
+            with st.expander("Our verdict vs Wall Street", expanded=True):
+                if analyst is None or not analyst.found or not analyst.has_coverage:
+                    st.info("No analyst coverage for this stock (common for smaller and "
+                            "Tel-Aviv listings) — nothing to compare against here.")
+                else:
+                    col_ours, col_street = st.columns(2)
+                    with col_ours:
+                        st.markdown("**Our verdict (1-year)**")
+                        hv = (verdict.horizons.get("1Y")
+                              if verdict is not None and verdict.found else None)
+                        if hv is not None and hv.enough_data:
+                            c = VERDICT_COLORS.get(hv.label, "gray")
+                            st.markdown(f":{c}[**{hv.label}**]")
+                            st.metric("Score", f"{hv.score:.0f}/100",
+                                      help=engine.HELP_TEXTS.get("verdict_score"),
+                                      label_visibility="collapsed")
+                        else:
+                            st.markdown("n/a")
+                        st.caption("rule-based, from price + fundamentals")
+                    with col_street:
+                        st.markdown("**Analyst consensus**")
+                        c = ANALYST_COLORS.get(analyst.label, "gray")
+                        st.markdown(f":{c}[**{analyst.label}**]")
+                        if analyst.mean is not None:
+                            st.metric("Mean rating", f"{analyst.mean:.2f}/5",
+                                      help=engine.HELP_TEXTS.get("analyst_mean"),
+                                      label_visibility="collapsed")
+                            st.caption(f"from {analyst.num_analysts or '?'} analysts")
+
+                    # Mean price target vs current price (implied upside / downside).
+                    if analyst.target_mean and analyst.current_price:
+                        cur = analyst.currency or ""
+                        up = analyst.upside_pct or 0.0
+                        arrow = "🔺" if up >= 0 else "🔻"
+                        sign = "+" if up >= 0 else ""
+                        st.write(
+                            f"**Mean price target:** {analyst.target_mean:,.2f} {cur} "
+                            f"({arrow} {sign}{up:.1f}% vs current {analyst.current_price:,.2f})"
+                        )
+                        if analyst.target_low and analyst.target_high:
+                            st.caption(f"analyst range {analyst.target_low:,.2f} - "
+                                       f"{analyst.target_high:,.2f} {cur}")
+
+                    # (Recent analyst actions now live in the Ownership tab.)
+
+                    # ALWAYS say something about how we compare to the analysts.
+                    divergence = engine.explain_divergence(verdict, analyst, "1Y")
+                    if not divergence.diverges:
+                        # Agreement -> a short positive note (never an empty section).
+                        st.success("✅ " + (divergence.note or
+                                   "Our verdict is in line with the analyst consensus."))
+                    else:
+                        if divergence.direction == "analysts_more_bullish":
+                            title = (f"⚖️ Why the gap? Analysts ({divergence.analyst_label}) "
+                                     f"are more bullish than our 1-year view "
+                                     f"({divergence.our_label})")
+                            drivers_word = "Holding our score back"
+                        else:
+                            title = (f"⚖️ Why the gap? Our 1-year view ({divergence.our_label}) "
+                                     f"is more bullish than analysts "
+                                     f"({divergence.analyst_label})")
+                            drivers_word = "Lifting our score"
+                        # Inline (an expander can't nest inside this one).
+                        st.markdown(f"**{title}**")
+                        st.write(divergence.note)
+                        if divergence.drivers:
+                            st.write(f"**{drivers_word}:**")
+                            for name, measured, weighted in divergence.drivers:
+                                st.write(f"- **{name}** — {measured} ({weighted:+.1f})")
+
+                # Link out — per-site analyst scores are often paywalled.
+                st.caption(
+                    f"More detail on [Yahoo Finance]"
+                    f"(https://finance.yahoo.com/quote/{symbol}/analysis). "
+                    "Per-site analyst scores (e.g. TipRanks) are often paywalled."
                 )
-                if analyst.target_low and analyst.target_high:
-                    st.caption(f"analyst range {analyst.target_low:,.2f} - "
-                               f"{analyst.target_high:,.2f} {cur}")
 
-            # Recent upgrades / downgrades.
-            if analyst.actions:
-                with st.expander("Recent analyst actions (upgrades / downgrades)"):
+        # ======================= AI analysis =======================
+        with tab_ai:
+            # OPTIONAL; Gemini, button-triggered. We NEVER auto-call Gemini — the
+            # user clicks a button. Each (symbol, depth) result is cached in
+            # session_state so re-clicks / reruns don't re-call (protecting
+            # free-tier quota). With no key the buttons are disabled (tooltip) and
+            # nothing else appears; any failure renders a muted note, never raises.
+            st.markdown("**🤖 AI analysis**")
+            gemini_key = get_gemini_key()
+            no_key = not gemini_key
+            ai_cache = st.session_state.setdefault("_gemini_cache", {})
+            ai_active = st.session_state.setdefault("_gemini_active_depth", {})
+
+            disabled_help = "Add a Gemini API key to enable" if no_key else None
+            col_quick, col_deep = st.columns(2)
+            if col_quick.button("⚡ Quick take", key="ai_quick_btn", disabled=no_key,
+                                help=disabled_help, width="stretch"):
+                ai_active[symbol] = "quick"
+            if col_deep.button("🔍 Deep dive", key="ai_deep_btn", disabled=no_key,
+                               help=disabled_help, width="stretch"):
+                ai_active[symbol] = "deep"
+
+            # Show the most-recently-requested depth for this symbol (if any). The
+            # result is generated once, then served from the per-(symbol, depth) cache.
+            depth = ai_active.get(symbol)
+            if depth:
+                cache_key = (symbol, depth)
+                if cache_key not in ai_cache:
+                    # Build the payload from data already on the page, then call once.
+                    divergence_for_ai = None
+                    try:
+                        if (verdict is not None and analyst is not None
+                                and analyst.found and analyst.has_coverage):
+                            divergence_for_ai = engine.explain_divergence(
+                                verdict, analyst, "1Y")
+                    except Exception:
+                        divergence_for_ai = None
+                    try:
+                        company_ai = load_company(symbol)
+                    except Exception:
+                        company_ai = None
+                    try:
+                        technicals_ai = load_technicals(symbol)
+                    except Exception:
+                        technicals_ai = None
+                    payload = _gemini_payload(symbol, verdict, company_ai,
+                                              technicals_ai, analyst, divergence_for_ai)
+                    ai_cache[cache_key] = gemini_helper.explain_verdict(
+                        payload, gemini_key, depth=depth)
+
+                explanation = ai_cache[cache_key]
+                if explanation:
+                    st.info(explanation)
+                    st.caption("AI-generated summary of the data above — "
+                               "not financial advice.")
+                else:
+                    # Only AFTER a click: a small muted note. Never auto, never crash.
+                    st.caption("_AI analysis unavailable._")
+
+        # ======================= Charts =======================
+        with tab_charts:
+            with st.expander("Price history", expanded=True):
+                # Range selector as a row of buttons (segmented control). The keys
+                # come straight from the engine so the two never drift apart.
+                range_key = st.segmented_control(
+                    "Range",
+                    options=list(engine.RANGES.keys()),
+                    default="1M",
+                    label_visibility="collapsed",
+                )
+                # If the user clicks the active button it deselects (returns None);
+                # fall back to the default so a chart is always shown.
+                range_key = range_key or "1M"
+
+                # Toggle between a clean line of closing prices and candlesticks.
+                chart_type = st.radio(
+                    "Chart type",
+                    options=["Line", "Candlestick"],
+                    horizontal=True,
+                )
+
+                # Y-axis toggle: actual Price (default) vs % change from the start
+                # of the selected range (normalised so the first point = 0%).
+                as_percent = st.toggle(
+                    "Show as % change from start of range",
+                    value=False,
+                    help="Normalises the line so the start of the range = 0%, showing "
+                         "the percentage gain/loss across the range.",
+                )
+
+                # Fetch the candles for the chosen range (cached).
+                history = load_history(symbol, range_key)
+
+                if not history.found:
+                    # Empty range (common for 1D/1W intraday on the free tier).
+                    st.info(f"No chart data for {range_key}: {history.reason}")
+                else:
+                    if chart_type == "Candlestick":
+                        # Candles always plot price ($) on the LEFT axis. With % ON
+                        # we keep the candles and add a linked RIGHT "% change" axis
+                        # instead of swapping in a line (for one stock the % line
+                        # would just trace the candles — see price_to_pct_change).
+                        base_close = engine.first_close(history.data) if as_percent else None
+                        st.altair_chart(
+                            make_candlestick(history.data, pct_first_close=base_close),
+                            width="stretch",
+                        )
+                        if base_close:
+                            st.caption("ℹ️ Candles show price ($, left axis); the right "
+                                       "axis reads cumulative % change from the start of "
+                                       "the selected range.")
+                    elif as_percent:
+                        # Line + % view: a normalised line (start of range = 0%).
+                        closes = history.data.set_index("Date")["Close"]
+                        pct = engine.price_to_pct_change(closes, engine.first_close(history.data))
+                        pct.name = "% change"
+                        st.line_chart(pct)
+                    else:
+                        # Built-in line chart: closing price over time.
+                        st.line_chart(history.data.set_index("Date")["Close"])
+
+            with st.expander("Volume", expanded=False):
+                # Same logic as before: only when there's real volume for this range.
+                has_volume = False
+                if history.found and "Volume" in history.data.columns:
+                    volumes = history.data["Volume"].dropna()
+                    has_volume = len(volumes) > 0 and float(volumes.sum()) > 0
+                if has_volume:
+                    st.altair_chart(make_volume_chart(history.data), width="stretch")
+                else:
+                    st.caption("_No volume data for this range._")
+
+        # ======================= Fundamentals =======================
+        with tab_fund:
+            with st.expander("Company analysis", expanded=True):
+                st.caption("The business behind the stock. Hover the **?** on any "
+                           "tile for a plain-language explanation.")
+                if company is not None and company.found and company.metrics:
+                    st.caption(COLOR_LEGEND)
+                    render_metrics(company, context=metric_context)
+                else:
+                    st.info("No company metrics available for this ticker.")
+
+        # ======================= Technicals =======================
+        with tab_tech:
+            st.caption("How the share price itself has been behaving.")
+            if technicals is not None and technicals.found and technicals.metrics:
+                with st.expander("Price levels, trend & momentum", expanded=True):
+                    st.caption(COLOR_LEGEND)
+                    render_metrics(technicals, keys=PRICE_TREND_KEYS,
+                                   context=metric_context)
+                with st.expander("Volume & buy/sell pressure (estimates)",
+                                 expanded=False):
+                    render_metrics(technicals, keys=PRESSURE_KEYS,
+                                   context=metric_context)
+                    st.caption(
+                        "Note: free data doesn't separate buy-volume from sell-volume, "
+                        "so **OBV** and **Accumulation/Distribution** are *estimates* of "
+                        "buying/selling pressure derived from price + volume — not true "
+                        "order-flow data."
+                    )
+            else:
+                st.info("No stock metrics available for this ticker.")
+
+        # ======================= Ownership =======================
+        with tab_own:
+            with st.expander("Notable institutional holders", expanded=True):
+                if holders is None or not holders.found:
+                    st.caption("_No institutional holder data available for this stock._")
+                else:
+                    if holders.institutions_pct_held is not None:
+                        pct = holders.institutions_pct_held * 100
+                        across = (f" across {holders.institutions_count:,} institutions"
+                                  if holders.institutions_count else "")
+                        st.markdown(f"**{pct:.1f}%** of shares held by institutions{across}.")
+
+                    if holders.top_holders:
+                        table = pd.DataFrame([{
+                            "Holder": h.name,
+                            "Shares": f"{h.shares:,}" if h.shares is not None else "n/a",
+                            "% held": (f"{h.pct_held * 100:.2f}%"
+                                       if h.pct_held is not None else "n/a"),
+                            "Date reported": h.date_reported or "n/a",
+                        } for h in holders.top_holders])
+                        st.dataframe(table, hide_index=True, width="stretch")
+                        st.caption(
+                            "Top institutional holders from quarterly **13F filings** "
+                            "(lagged up to ~45 days), mostly large asset managers (e.g. "
+                            "Vanguard, BlackRock). This is **not** a real-time or "
+                            "famous-investor view, and **not financial advice**."
+                        )
+                    else:
+                        # Summary % available but no named-holder breakdown (common
+                        # for smaller / foreign listings).
+                        st.caption(
+                            "Institutional ownership summary from quarterly **13F "
+                            "filings** (lagged up to ~45 days); a named holder breakdown "
+                            "isn't available for this stock. **Not financial advice**."
+                        )
+
+            with st.expander("Recent analyst actions (upgrades / downgrades)",
+                             expanded=False):
+                if (analyst is not None and analyst.found
+                        and getattr(analyst, "actions", None)):
                     for a in analyst.actions:
                         verb = engine.humanize_action(a["action"])
                         if a["from_grade"] and a["from_grade"] != a["to_grade"]:
@@ -691,260 +953,11 @@ if symbol:
                                   if a.get("price_target") else "")
                         st.write(f"- **{a['date']}** {a['firm']}: {verb} "
                                  f"({grade}){target}")
-
-            # ALWAYS say something about how we compare to the analysts.
-            divergence = engine.explain_divergence(verdict, analyst, "1Y")
-            if not divergence.diverges:
-                # Agreement -> a short positive note (never an empty section).
-                st.success("✅ " + (divergence.note or
-                           "Our verdict is in line with the analyst consensus."))
-            else:
-                if divergence.direction == "analysts_more_bullish":
-                    title = (f"⚖️ Why the gap? Analysts ({divergence.analyst_label}) "
-                             f"are more bullish than our 1-year view "
-                             f"({divergence.our_label})")
-                    drivers_word = "Holding our score back"
                 else:
-                    title = (f"⚖️ Why the gap? Our 1-year view ({divergence.our_label}) "
-                             f"is more bullish than analysts "
-                             f"({divergence.analyst_label})")
-                    drivers_word = "Lifting our score"
-                with st.expander(title, expanded=True):
-                    st.write(divergence.note)
-                    if divergence.drivers:
-                        st.write(f"**{drivers_word}:**")
-                        for name, measured, weighted in divergence.drivers:
-                            st.write(f"- **{name}** — {measured} ({weighted:+.1f})")
+                    st.caption("_No recent analyst actions available._")
 
-        # Link out — per-site analyst scores are often paywalled.
-        st.caption(
-            f"More detail on [Yahoo Finance]"
-            f"(https://finance.yahoo.com/quote/{symbol}/analysis). "
-            "Per-site analyst scores (e.g. TipRanks) are often paywalled."
-        )
-
-        # --- Notable institutional holders (real 13F filing data) -------
-        st.divider()
-        st.subheader("Notable institutional holders")
-        try:
-            holders = load_holders(symbol)
-        except Exception:
-            holders = None
-
-        if holders is None or not holders.found:
-            st.caption("_No institutional holder data available for this stock._")
-        else:
-            if holders.institutions_pct_held is not None:
-                pct = holders.institutions_pct_held * 100
-                across = (f" across {holders.institutions_count:,} institutions"
-                          if holders.institutions_count else "")
-                st.markdown(f"**{pct:.1f}%** of shares held by institutions{across}.")
-
-            if holders.top_holders:
-                table = pd.DataFrame([{
-                    "Holder": h.name,
-                    "Shares": f"{h.shares:,}" if h.shares is not None else "n/a",
-                    "% held": (f"{h.pct_held * 100:.2f}%"
-                               if h.pct_held is not None else "n/a"),
-                    "Date reported": h.date_reported or "n/a",
-                } for h in holders.top_holders])
-                st.dataframe(table, hide_index=True, width="stretch")
-                st.caption(
-                    "Top institutional holders from quarterly **13F filings** "
-                    "(lagged up to ~45 days), mostly large asset managers (e.g. "
-                    "Vanguard, BlackRock). This is **not** a real-time or "
-                    "famous-investor view, and **not financial advice**."
-                )
-            else:
-                # Summary % available but no named-holder breakdown (common for
-                # smaller / foreign listings).
-                st.caption(
-                    "Institutional ownership summary from quarterly **13F "
-                    "filings** (lagged up to ~45 days); a named holder breakdown "
-                    "isn't available for this stock. **Not financial advice**."
-                )
-
-        # --- AI analysis (OPTIONAL; Gemini, button-triggered) -----------
-        # Two depths, ON DEMAND. We NEVER auto-call Gemini — the user clicks a
-        # button. Each (symbol, depth) result is cached in session_state so
-        # re-clicks / page reruns don't re-call (protecting free-tier quota).
-        # With no key the buttons are disabled (with a tooltip) and nothing else
-        # appears; any failure renders a muted note, never an exception.
-        st.divider()
-        st.markdown("**🤖 AI analysis**")
-        gemini_key = get_gemini_key()
-        no_key = not gemini_key
-        ai_cache = st.session_state.setdefault("_gemini_cache", {})
-        ai_active = st.session_state.setdefault("_gemini_active_depth", {})
-
-        disabled_help = "Add a Gemini API key to enable" if no_key else None
-        col_quick, col_deep = st.columns(2)
-        if col_quick.button("⚡ Quick take", key="ai_quick_btn", disabled=no_key,
-                            help=disabled_help, width="stretch"):
-            ai_active[symbol] = "quick"
-        if col_deep.button("🔍 Deep dive", key="ai_deep_btn", disabled=no_key,
-                           help=disabled_help, width="stretch"):
-            ai_active[symbol] = "deep"
-
-        # Show the most-recently-requested depth for this symbol (if any). The
-        # result is generated once, then served from the per-(symbol, depth) cache.
-        depth = ai_active.get(symbol)
-        if depth:
-            cache_key = (symbol, depth)
-            if cache_key not in ai_cache:
-                # Build the payload from data already on the page, then call once.
-                divergence_for_ai = None
-                try:
-                    if (verdict is not None and analyst is not None
-                            and analyst.found and analyst.has_coverage):
-                        divergence_for_ai = engine.explain_divergence(
-                            verdict, analyst, "1Y")
-                except Exception:
-                    divergence_for_ai = None
-                try:
-                    company_ai = load_company(symbol)
-                except Exception:
-                    company_ai = None
-                try:
-                    technicals_ai = load_technicals(symbol)
-                except Exception:
-                    technicals_ai = None
-                payload = _gemini_payload(symbol, verdict, company_ai,
-                                          technicals_ai, analyst, divergence_for_ai)
-                ai_cache[cache_key] = gemini_helper.explain_verdict(
-                    payload, gemini_key, depth=depth)
-
-            explanation = ai_cache[cache_key]
-            if explanation:
-                st.info(explanation)
-                st.caption("AI-generated summary of the data above — "
-                           "not financial advice.")
-            else:
-                # Only AFTER a click: a small muted note. Never auto, never crash.
-                st.caption("_AI analysis unavailable._")
-
-        # --- Price history chart ----------------------------------------
-        st.divider()
-        st.subheader("Price history")
-
-        # Range selector as a row of buttons (segmented control). The keys come
-        # straight from the engine so the two never drift apart. Default = 1M.
-        range_key = st.segmented_control(
-            "Range",
-            options=list(engine.RANGES.keys()),
-            default="1M",
-            label_visibility="collapsed",
-        )
-        # If the user clicks the active button it deselects (returns None);
-        # fall back to the default so a chart is always shown.
-        range_key = range_key or "1M"
-
-        # Toggle between a clean line of closing prices and full candlesticks.
-        chart_type = st.radio(
-            "Chart type",
-            options=["Line", "Candlestick"],
-            horizontal=True,
-        )
-
-        # Y-axis toggle: actual Price (default) vs % change from the start of
-        # the selected range (normalised so the first point = 0%).
-        as_percent = st.toggle(
-            "Show as % change from start of range",
-            value=False,
-            help="Normalises the line so the start of the range = 0%, showing "
-                 "the percentage gain/loss across the range.",
-        )
-
-        # Fetch the candles for the chosen range (cached).
-        history = load_history(symbol, range_key)
-
-        if not history.found:
-            # Empty range (common for 1D/1W intraday on the free tier).
-            st.info(f"No chart data for {range_key}: {history.reason}")
-        else:
-            if chart_type == "Candlestick":
-                # Candles always plot price ($) on the LEFT axis. With % ON we
-                # keep the candles and add a linked RIGHT "% change" axis instead
-                # of swapping in a line (for one stock the % line would just trace
-                # the same path as the candles — see engine.price_to_pct_change).
-                base_close = engine.first_close(history.data) if as_percent else None
-                st.altair_chart(
-                    make_candlestick(history.data, pct_first_close=base_close),
-                    width="stretch",
-                )
-                if base_close:
-                    st.caption("ℹ️ Candles show price ($, left axis); the right "
-                               "axis reads cumulative % change from the start of "
-                               "the selected range.")
-            elif as_percent:
-                # Line + % view: a normalised line (start of range = 0%).
-                closes = history.data.set_index("Date")["Close"]
-                pct = engine.price_to_pct_change(closes, engine.first_close(history.data))
-                pct.name = "% change"
-                st.line_chart(pct)
-            else:
-                # Built-in line chart: closing price over time.
-                st.line_chart(history.data.set_index("Date")["Close"])
-
-            # --- Subtle volume sub-panel ---
-            # Only show it when there's real volume data for this range; if it's
-            # missing or all-zero (can happen on some ranges), hide it quietly.
-            if "Volume" in history.data.columns:
-                volumes = history.data["Volume"].dropna()
-                if len(volumes) > 0 and float(volumes.sum()) > 0:
-                    st.caption("Volume")
-                    st.altair_chart(make_volume_chart(history.data), width="stretch")
-
-        # --- Company analysis (the business) ----------------------------
-        st.divider()
-        st.subheader("Company analysis")
-        st.caption("The business behind the stock. Hover the **?** on any tile "
-                   "for a plain-language explanation.")
-        try:
-            company = load_company(symbol)
-        except Exception:
-            company = None
-        # Context for the color cues: the stock's sector (for sector-aware
-        # valuation thresholds) and its current price (for price-vs-MA).
-        sector = None
-        if company is not None and company.found:
-            sm = company.metrics.get("sector")
-            sector = sm.value if (sm and sm.available) else None
-        metric_context = {"sector": sector, "price": quote.price}
-        if company is not None and company.found and company.metrics:
-            st.caption(COLOR_LEGEND)
-            render_metrics(company, context=metric_context)
-        else:
-            st.info("No company metrics available for this ticker.")
-
-        # --- Stock analysis (the share-price behaviour) -----------------
-        st.divider()
-        st.subheader("Stock analysis")
-        st.caption("How the share price itself has been behaving.")
-        try:
-            technicals = load_technicals(symbol)
-        except Exception:
-            technicals = None
-        if technicals is not None and technicals.found and technicals.metrics:
-            # Group 1: price levels, trend & momentum.
-            st.markdown("**Price levels, trend & momentum**")
-            st.caption(COLOR_LEGEND)
-            render_metrics(technicals, keys=PRICE_TREND_KEYS, context=metric_context)
-            # Group 2: volume & buy/sell pressure (kept together and labelled so
-            # the OBV / A-D / volume-confirmation tiles are easy to find).
-            st.markdown("**Volume & buy/sell pressure (estimates)**")
-            render_metrics(technicals, keys=PRESSURE_KEYS, context=metric_context)
-            st.caption(
-                "Note: free data doesn't separate buy-volume from sell-volume, "
-                "so **OBV** and **Accumulation/Distribution** are *estimates* of "
-                "buying/selling pressure derived from price + volume — not true "
-                "order-flow data."
-            )
-        else:
-            st.info("No stock metrics available for this ticker.")
-
-        # Collapsed by default. Open it to see WHICH source gave us the price
-        # and every raw value we tried — handy for diagnosing odd tickers.
+        # Debug panel stays below the tabs (collapsed). Open it to see WHICH
+        # source gave us the price and every raw value we tried.
         with st.expander("🔧 Debug details", expanded=False):
             st.write(f"**Price came from:** `{quote.price_source}`")
             st.write(

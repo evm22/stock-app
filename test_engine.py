@@ -425,8 +425,16 @@ def expect_app_renders_without_gemini():
         "no AI box should appear before a click"
     assert not any("AI analysis unavailable" in c for c in captions), \
         "the unavailable note must only appear after a click"
-    print(f"      app key=None: Quick+Deep buttons present & disabled, "
-          f"no AI box ({len(buttons)} buttons total)")
+
+    # New tabbed layout: the verdict + key sections render (as expanders).
+    exp_labels = [getattr(e, "label", None)
+                  or getattr(getattr(e, "proto", None), "label", "")
+                  for e in at.expander]
+    assert "Verdict" in exp_labels, "the Verdict section should render"
+    assert "Company analysis" in exp_labels, "Fundamentals should render"
+    assert "Notable institutional holders" in exp_labels, "Ownership should render"
+    print(f"      app key=None: Quick+Deep buttons present & disabled, no AI "
+          f"box; verdict+fundamentals+ownership render ({len(buttons)} buttons)")
 
 
 def expect_app_holders_no_data():
@@ -449,9 +457,12 @@ def expect_app_holders_no_data():
         if len(at.selectbox) >= 1:
             at.selectbox[0].set_value("AAPL").run()
         assert not at.exception, f"app raised with empty holders: {at.exception}"
-        subs = [getattr(s, "value", "") for s in at.subheader]
-        assert "Notable institutional holders" in subs, \
-            "the holders section header should render"
+        # The holders section is now an st.expander inside the Ownership tab.
+        exp_labels = [getattr(e, "label", None)
+                      or getattr(getattr(e, "proto", None), "label", "")
+                      for e in at.expander]
+        assert "Notable institutional holders" in exp_labels, \
+            "the holders section (expander) should render"
         caps = [getattr(c, "value", "") for c in at.caption]
         assert any("No institutional holder data" in c for c in caps), \
             "the muted no-data line should show when holders are empty"
