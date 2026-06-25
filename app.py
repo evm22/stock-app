@@ -18,6 +18,7 @@ import pandas as pd
 import streamlit as st
 
 import engine  # our pure-Python data engine (no Streamlit inside it)
+import gemini_helper  # OPTIONAL Gemini explanation layer (no-op without a key)
 
 # Basic page configuration (title shown in the browser tab, etc.).
 st.set_page_config(page_title="Stock Analysis App", page_icon="📈")
@@ -129,6 +130,87 @@ def format_metric(metric, currency):
         return _abbreviate(value)
     # "date" and "text" both just print the value as-is.
     return str(value)
+
+
+def get_gemini_key():
+    """Read the optional Gemini API key from Streamlit secrets. Returns None if
+    there's no secrets file or no key set — the AI summary is then skipped
+    silently. Wrapped so a totally-missing secrets file can't crash the app.
+
+    STOCKAPP_DISABLE_GEMINI is a test seam (like STOCKAPP_DISABLE_BROWSER_STORAGE):
+    when set, we force the no-key path so tests never touch Gemini, even if a real
+    secrets.toml exists locally."""
+    if os.environ.get("STOCKAPP_DISABLE_GEMINI"):
+        return None
+    try:
+        return st.secrets.get("GEMINI_API_KEY", None)
+    except Exception:
+        return None
+
+
+def _gemini_payload(symbol, verdict, company, technicals, analyst, divergence):
+    """Shape the already-computed objects into a plain dict for the explainer.
+    Every value is a display string already shown on the page; missing values
+    are marked 'MISSING' (never guessed). No new numbers are computed here."""
+    def disp(group, key):
+        metric = group.metrics.get(key) if (group and group.found) else None
+        if metric is None or not metric.available:
+            return "MISSING"
+        return format_metric(metric, group.currency if group else "")
+
+    horizons = {}
+    if verdict is not None and verdict.found:
+        for horizon in engine.HORIZONS:
+            hv = verdict.horizons.get(horizon)
+            horizons[horizon] = (f"{hv.label} ({hv.score:.0f}/100)"
+                                 if (hv and hv.enough_data) else "MISSING")
+
+    if analyst is not None and analyst.found and analyst.has_coverage:
+        analyst_data = {
+            "consensus": analyst.label or "MISSING",
+            "mean_rating_1to5": (analyst.mean if analyst.mean is not None
+                                 else "MISSING"),
+            "num_analysts": analyst.num_analysts or "MISSING",
+            "mean_price_target": (analyst.target_mean if analyst.target_mean
+                                  else "MISSING"),
+            "implied_upside_pct": (round(analyst.upside_pct, 1)
+                                   if analyst.upside_pct is not None else "MISSING"),
+        }
+    else:
+        analyst_data = "MISSING (no analyst coverage)"
+
+    return {
+        "symbol": symbol,
+        "verdict_by_horizon": horizons or "MISSING",
+        "fundamentals": {
+            "sector": disp(company, "sector"),
+            "industry": disp(company, "industry"),
+            "market_cap": disp(company, "market_cap"),
+            "pe_trailing": disp(company, "pe"),
+            "forward_pe": disp(company, "forward_pe"),
+            "peg": disp(company, "peg"),
+            "revenue_ttm": disp(company, "revenue"),
+            "earnings_growth_yoy": disp(company, "earnings_growth"),
+            "revenue_growth_yoy": disp(company, "revenue_growth"),
+            "profit_margin": disp(company, "profit_margin"),
+            "dividend_yield": disp(company, "dividend_yield"),
+            "debt_to_equity": disp(company, "debt_to_equity"),
+            "free_cash_flow": disp(company, "free_cash_flow"),
+        },
+        "technicals": {
+            "rsi": disp(technicals, "rsi"),
+            "ma50": disp(technicals, "ma50"),
+            "ma200": disp(technicals, "ma200"),
+            "macd_trend": disp(technicals, "macd_state"),
+            "bollinger_position": disp(technicals, "bb_state"),
+            "week52_high": disp(technicals, "week52_high"),
+            "week52_low": disp(technicals, "week52_low"),
+            "beta": disp(technicals, "beta"),
+        },
+        "analyst": analyst_data,
+        "divergence_note": (divergence.note if (divergence
+                            and getattr(divergence, "note", None)) else "MISSING"),
+    }
 
 
 # Stock-analysis tiles are split into two readable groups.
@@ -634,6 +716,45 @@ if symbol:
             f"(https://finance.yahoo.com/quote/{symbol}/analysis). "
             "Per-site analyst scores (e.g. TipRanks) are often paywalled."
         )
+
+        # --- AI plain-language summary (OPTIONAL; Gemini) ---------------
+        # Turns the structured data above into a short, neutral explanation.
+        # Entirely optional and crash-proof: with no API key, or on ANY error,
+        # explain_verdict() returns None and we render NOTHING extra. Cached per
+        # symbol for the session so reruns don't burn free-tier quota.
+        gemini_key = get_gemini_key()
+        explanations = st.session_state.setdefault("_gemini_explanations", {})
+        if symbol in explanations:
+            explanation = explanations[symbol]
+        else:
+            divergence_for_ai = None
+            try:
+                if (verdict is not None and analyst is not None
+                        and analyst.found and analyst.has_coverage):
+                    divergence_for_ai = engine.explain_divergence(
+                        verdict, analyst, "1Y")
+            except Exception:
+                divergence_for_ai = None
+            try:
+                company_ai = load_company(symbol)
+            except Exception:
+                company_ai = None
+            try:
+                technicals_ai = load_technicals(symbol)
+            except Exception:
+                technicals_ai = None
+            payload = _gemini_payload(symbol, verdict, company_ai, technicals_ai,
+                                      analyst, divergence_for_ai)
+            explanation = gemini_helper.explain_verdict(payload, gemini_key)
+            explanations[symbol] = explanation
+
+        # Only render when we actually got text back; otherwise nothing changes.
+        if explanation:
+            st.divider()
+            st.subheader("In plain language")
+            st.info(explanation)
+            st.caption("AI-generated summary of the data above — "
+                       "not financial advice.")
 
         # --- Price history chart ----------------------------------------
         st.divider()

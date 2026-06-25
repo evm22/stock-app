@@ -17,6 +17,11 @@ connection and an English (non-Hebrew) folder path for it to work locally.
 import os
 import sys
 
+# Force the no-key path for EVERY AppTest run in this suite, so the tests never
+# touch Gemini (network/quota/key) even though a real secrets.toml may exist
+# locally. Must be set before app.py is imported by AppTest. See app.get_gemini_key.
+os.environ.setdefault("STOCKAPP_DISABLE_GEMINI", "1")
+
 import pandas as pd
 import yfinance as yf  # for the Hebrew-alias English-name fallback search
 
@@ -382,6 +387,28 @@ def expect_metric_tiles_colored(symbol):
           f"{len(with_help)} keep tooltips")
 
 
+def expect_app_renders_without_gemini():
+    """With NO Gemini key, the app renders exactly as before: the 'In plain
+    language' box is absent and nothing raises. The STOCKAPP_DISABLE_GEMINI seam
+    (set at module load) forces the no-key path, so this never touches Gemini even
+    if a local secrets.toml exists. (Reuses the AppTest harness; live AAPL only.)"""
+    assert os.environ.get("STOCKAPP_DISABLE_GEMINI"), \
+        "test seam must be set so we never call Gemini"
+    os.environ.setdefault("STOCKAPP_DISABLE_BROWSER_STORAGE", "1")
+    from streamlit.testing.v1 import AppTest
+    at = AppTest.from_file("app.py", default_timeout=90)
+    at.run()
+    at.text_input(key="search_box").set_value("AAPL").run()
+    if len(at.selectbox) >= 1:
+        at.selectbox[0].set_value("AAPL").run()
+    assert not at.exception, f"app raised with key=None: {at.exception}"
+    subheaders = [getattr(s, "value", "") for s in at.subheader]
+    assert "In plain language" not in subheaders, \
+        "the Gemini box must be ABSENT when no key is configured"
+    print(f"      app renders with key=None; no AI box "
+          f"({len(subheaders)} subheaders, none AI)")
+
+
 def expect_hebrew_aliases_resolve():
     """Every curated Hebrew alias must resolve to a LIVE match: either its
     preferred ticker resolves, or a Yahoo search on its English name returns at
@@ -731,6 +758,10 @@ def main():
     for symbol in ["AAPL", "MSFT"]:
         results.append(check(f"{symbol} metric tiles render with color cues",
                              lambda s=symbol: expect_metric_tiles_colored(s)))
+
+    # The optional Gemini layer is skipped silently when no key is configured.
+    results.append(check("app renders normally with no Gemini key (box absent)",
+                         lambda: expect_app_renders_without_gemini()))
 
     # Step 5: analyst consensus (covered, uncovered, and invalid).
     for symbol in ["AAPL", "TEVA"]:
