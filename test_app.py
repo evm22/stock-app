@@ -288,17 +288,21 @@ def expect_classify_metric():
 
 def expect_gemini_optional_offline():
     """The Gemini layer is optional and offline-safe: with no key it returns None
-    immediately (no google-generativeai import, no network), and weird/garbage
-    structured_data never raises. Runs with NO key and NO network."""
+    immediately (no google-generativeai import, no network) for BOTH depths, and
+    weird/garbage structured_data never raises. Runs with NO key and NO network."""
     good = {"symbol": "AAPL", "verdict_by_horizon": {"1Y": "Buy (60/100)"}}
+    for depth in ("quick", "deep"):
+        assert gemini_helper.explain_verdict(good, None, depth=depth) is None
+        assert gemini_helper.explain_verdict(good, "", depth=depth) is None  # empty key
+        # Missing / garbage structured_data, still no key -> None, never raises.
+        assert gemini_helper.explain_verdict(None, None, depth=depth) is None
+        assert gemini_helper.explain_verdict("not a dict", None, depth=depth) is None
+        assert gemini_helper.explain_verdict({"weird": object()}, None, depth=depth) is None
+        assert gemini_helper.explain_verdict({}, None, depth=depth) is None
+    # Default depth (quick) also off without a key.
     assert gemini_helper.explain_verdict(good, None) is None
-    assert gemini_helper.explain_verdict(good, "") is None       # empty key = off
-    # Missing / garbage structured_data, still no key -> None, never raises.
-    assert gemini_helper.explain_verdict(None, None) is None
-    assert gemini_helper.explain_verdict("not a dict", None) is None
-    assert gemini_helper.explain_verdict({"weird": object()}, None) is None
-    assert gemini_helper.explain_verdict({}, None) is None
-    print("      gemini explain_verdict: None without a key; garbage never raises")
+    print("      gemini explain_verdict: None without a key (quick+deep); "
+          "garbage never raises")
 
 
 def main():

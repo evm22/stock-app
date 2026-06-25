@@ -717,44 +717,64 @@ if symbol:
             "Per-site analyst scores (e.g. TipRanks) are often paywalled."
         )
 
-        # --- AI plain-language summary (OPTIONAL; Gemini) ---------------
-        # Turns the structured data above into a short, neutral explanation.
-        # Entirely optional and crash-proof: with no API key, or on ANY error,
-        # explain_verdict() returns None and we render NOTHING extra. Cached per
-        # symbol for the session so reruns don't burn free-tier quota.
+        # --- AI analysis (OPTIONAL; Gemini, button-triggered) -----------
+        # Two depths, ON DEMAND. We NEVER auto-call Gemini — the user clicks a
+        # button. Each (symbol, depth) result is cached in session_state so
+        # re-clicks / page reruns don't re-call (protecting free-tier quota).
+        # With no key the buttons are disabled (with a tooltip) and nothing else
+        # appears; any failure renders a muted note, never an exception.
+        st.divider()
+        st.markdown("**🤖 AI analysis**")
         gemini_key = get_gemini_key()
-        explanations = st.session_state.setdefault("_gemini_explanations", {})
-        if symbol in explanations:
-            explanation = explanations[symbol]
-        else:
-            divergence_for_ai = None
-            try:
-                if (verdict is not None and analyst is not None
-                        and analyst.found and analyst.has_coverage):
-                    divergence_for_ai = engine.explain_divergence(
-                        verdict, analyst, "1Y")
-            except Exception:
-                divergence_for_ai = None
-            try:
-                company_ai = load_company(symbol)
-            except Exception:
-                company_ai = None
-            try:
-                technicals_ai = load_technicals(symbol)
-            except Exception:
-                technicals_ai = None
-            payload = _gemini_payload(symbol, verdict, company_ai, technicals_ai,
-                                      analyst, divergence_for_ai)
-            explanation = gemini_helper.explain_verdict(payload, gemini_key)
-            explanations[symbol] = explanation
+        no_key = not gemini_key
+        ai_cache = st.session_state.setdefault("_gemini_cache", {})
+        ai_active = st.session_state.setdefault("_gemini_active_depth", {})
 
-        # Only render when we actually got text back; otherwise nothing changes.
-        if explanation:
-            st.divider()
-            st.subheader("In plain language")
-            st.info(explanation)
-            st.caption("AI-generated summary of the data above — "
-                       "not financial advice.")
+        disabled_help = "Add a Gemini API key to enable" if no_key else None
+        col_quick, col_deep = st.columns(2)
+        if col_quick.button("⚡ Quick take", key="ai_quick_btn", disabled=no_key,
+                            help=disabled_help, use_container_width=True):
+            ai_active[symbol] = "quick"
+        if col_deep.button("🔍 Deep dive", key="ai_deep_btn", disabled=no_key,
+                           help=disabled_help, use_container_width=True):
+            ai_active[symbol] = "deep"
+
+        # Show the most-recently-requested depth for this symbol (if any). The
+        # result is generated once, then served from the per-(symbol, depth) cache.
+        depth = ai_active.get(symbol)
+        if depth:
+            cache_key = (symbol, depth)
+            if cache_key not in ai_cache:
+                # Build the payload from data already on the page, then call once.
+                divergence_for_ai = None
+                try:
+                    if (verdict is not None and analyst is not None
+                            and analyst.found and analyst.has_coverage):
+                        divergence_for_ai = engine.explain_divergence(
+                            verdict, analyst, "1Y")
+                except Exception:
+                    divergence_for_ai = None
+                try:
+                    company_ai = load_company(symbol)
+                except Exception:
+                    company_ai = None
+                try:
+                    technicals_ai = load_technicals(symbol)
+                except Exception:
+                    technicals_ai = None
+                payload = _gemini_payload(symbol, verdict, company_ai,
+                                          technicals_ai, analyst, divergence_for_ai)
+                ai_cache[cache_key] = gemini_helper.explain_verdict(
+                    payload, gemini_key, depth=depth)
+
+            explanation = ai_cache[cache_key]
+            if explanation:
+                st.info(explanation)
+                st.caption("AI-generated summary of the data above — "
+                           "not financial advice.")
+            else:
+                # Only AFTER a click: a small muted note. Never auto, never crash.
+                st.caption("_AI analysis unavailable._")
 
         # --- Price history chart ----------------------------------------
         st.divider()

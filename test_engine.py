@@ -388,10 +388,11 @@ def expect_metric_tiles_colored(symbol):
 
 
 def expect_app_renders_without_gemini():
-    """With NO Gemini key, the app renders exactly as before: the 'In plain
-    language' box is absent and nothing raises. The STOCKAPP_DISABLE_GEMINI seam
-    (set at module load) forces the no-key path, so this never touches Gemini even
-    if a local secrets.toml exists. (Reuses the AppTest harness; live AAPL only.)"""
+    """With NO Gemini key, the two AI buttons render but are DISABLED, no AI box
+    appears (nothing is auto-generated), and nothing raises. The
+    STOCKAPP_DISABLE_GEMINI seam (set at module load) forces the no-key path, so
+    this never touches Gemini even if a local secrets.toml exists. (Reuses the
+    AppTest harness; live AAPL only — no Gemini click-through.)"""
     assert os.environ.get("STOCKAPP_DISABLE_GEMINI"), \
         "test seam must be set so we never call Gemini"
     os.environ.setdefault("STOCKAPP_DISABLE_BROWSER_STORAGE", "1")
@@ -402,11 +403,30 @@ def expect_app_renders_without_gemini():
     if len(at.selectbox) >= 1:
         at.selectbox[0].set_value("AAPL").run()
     assert not at.exception, f"app raised with key=None: {at.exception}"
-    subheaders = [getattr(s, "value", "") for s in at.subheader]
-    assert "In plain language" not in subheaders, \
-        "the Gemini box must be ABSENT when no key is configured"
-    print(f"      app renders with key=None; no AI box "
-          f"({len(subheaders)} subheaders, none AI)")
+
+    def label_of(b):
+        return (getattr(b, "label", None)
+                or getattr(getattr(b, "proto", None), "label", "") or "")
+
+    def disabled_of(b):
+        return bool(getattr(getattr(b, "proto", None), "disabled", False))
+
+    buttons = at.button
+    quick = [b for b in buttons if "Quick take" in label_of(b)]
+    deep = [b for b in buttons if "Deep dive" in label_of(b)]
+    assert quick, "the 'Quick take' button should render"
+    assert deep, "the 'Deep dive' button should render"
+    # No key -> both AI buttons must be disabled.
+    assert disabled_of(quick[0]), "Quick take must be disabled without a key"
+    assert disabled_of(deep[0]), "Deep dive must be disabled without a key"
+    # Nothing was clicked -> the AI summary box / caption must be ABSENT.
+    captions = [getattr(c, "value", "") for c in at.caption]
+    assert not any("AI-generated summary" in c for c in captions), \
+        "no AI box should appear before a click"
+    assert not any("AI analysis unavailable" in c for c in captions), \
+        "the unavailable note must only appear after a click"
+    print(f"      app key=None: Quick+Deep buttons present & disabled, "
+          f"no AI box ({len(buttons)} buttons total)")
 
 
 def expect_hebrew_aliases_resolve():
