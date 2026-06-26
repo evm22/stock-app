@@ -34,6 +34,7 @@ import engine
 import app
 import gemini_helper
 import famous_investors
+import universe
 
 
 def check(description, test_function):
@@ -391,6 +392,66 @@ def expect_holders_resilient_offline():
     print("      holders: empty input + yfinance failure -> empty result, no raise")
 
 
+def expect_universe_structure():
+    """universe.get_universe()/get_themes() return the right shape: core is region
+    US, the israel theme is region IL, duplicates merge (NVDA spans many themes),
+    and the live S&P fetch is mocked so this needs NO network."""
+    U = universe
+
+    # Symbol normalization: class-share dots -> dashes; .TA preserved.
+    assert U.normalize_symbol("BRK.B") == "BRK-B"
+    assert U.normalize_symbol("bf.b") == "BF-B"
+    assert U.normalize_symbol("TEVA.TA") == "TEVA.TA"
+    assert U.normalize_symbol("  nvda ") == "NVDA"
+
+    # get_core_symbols: a (mocked) live fetch is used; a failure falls back.
+    real_fetch = U.fetch_sp500_symbols
+    def _raise():
+        raise RuntimeError("network down")
+    try:
+        U.fetch_sp500_symbols = lambda: ["AAPL", "MSFT", "NVDA"] * 50  # >100 -> used
+        assert "AAPL" in U.get_core_symbols()
+        U.fetch_sp500_symbols = _raise
+        assert U.get_core_symbols() == list(U.CORE_FALLBACK)  # fallback on failure
+    finally:
+        U.fetch_sp500_symbols = real_fetch
+
+    # Structure — inject core_symbols so there's NO live fetch.
+    uni = U.get_universe(core_symbols=["AAPL", "NVDA", "BRK-B"])
+    by_sym = {d["symbol"]: d for d in uni}
+    for d in uni:
+        assert set(d) == {"symbol", "regions", "themes"}
+        assert isinstance(d["regions"], list) and isinstance(d["themes"], list)
+
+    # Core tickers are US + theme "core".
+    assert "core" in by_sym["AAPL"]["themes"] and by_sym["AAPL"]["regions"] == ["US"]
+    # NVDA is merged across core + several themes (a known multi-theme symbol).
+    nv = by_sym["NVDA"]["themes"]
+    assert {"core", "ai", "semiconductors"} <= set(nv), f"NVDA themes: {nv}"
+    assert by_sym["NVDA"]["regions"] == ["US"]
+    # israel-theme tickers are region IL and .TA-suffixed (reused from engine).
+    israel = [d for d in uni if "israel" in d["themes"]]
+    assert israel, "expected israel-theme tickers"
+    assert all(d["regions"] == ["IL"] for d in israel)
+    assert all(d["symbol"].endswith(".TA") for d in israel)
+    # Duplicates merged: every symbol appears exactly once.
+    syms = [d["symbol"] for d in uni]
+    assert len(syms) == len(set(syms))
+
+    # Themes map + counts.
+    themes = U.get_themes()
+    expected = {"quantum", "semiconductors", "ai", "storage_cloud",
+                "healthcare_biotech", "real_estate_reits", "defense", "energy",
+                "cybersecurity", "fintech_payments", "ev_auto", "israel"}
+    assert expected <= set(themes), f"missing themes: {expected - set(themes)}"
+    assert all(isinstance(v, list) and v for v in themes.values())
+    counts = dict(U.list_themes())
+    assert counts["israel"] == len(themes["israel"]) >= 1
+    print(f"      universe: {len(uni)} symbols (injected core) across "
+          f"{len(themes)} themes; israel={counts['israel']} IL; "
+          f"NVDA themes={sorted(nv)}")
+
+
 def main():
     print("Running app display tests (no network)...\n")
     results = [
@@ -414,6 +475,8 @@ def main():
               expect_holders_resilient_offline),
         check("famous investors: ticker match + resilient (no network)",
               expect_famous_investors_offline),
+        check("universe: theme/region tagging + merge + mocked fetch (no network)",
+              expect_universe_structure),
     ]
 
     passed = sum(results)
