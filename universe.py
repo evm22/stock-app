@@ -57,7 +57,7 @@ THEMES = {
         "ADBE", "IBM", "ORCL", "BBAI", "SOUN", "TSM",
     ],
     "storage_cloud": [
-        "AMZN", "MSFT", "GOOGL", "SNOW", "NET", "DDOG", "MDB", "PSTG", "NTAP",
+        "AMZN", "MSFT", "GOOGL", "SNOW", "NET", "DDOG", "MDB", "NTAP",
         "WDC", "STX", "ORCL", "IBM", "AKAM", "FSLY", "BOX", "DBX", "ZS", "CRM",
         "NOW",
     ],
@@ -76,15 +76,18 @@ THEMES = {
     ],
     "energy": [
         "XOM", "CVX", "COP", "SLB", "EOG", "MPC", "PSX", "VLO", "OXY", "WMB",
-        "KMI", "OKE", "HES", "DVN", "HAL", "BKR", "FANG", "TRGP", "LNG", "ET",
+        "KMI", "OKE", "DVN", "HAL", "BKR", "FANG", "TRGP", "LNG", "ET",
         "EPD", "MPLX", "CTRA", "APA", "TPL",
     ],
     "cybersecurity": [
-        "PANW", "CRWD", "FTNT", "ZS", "S", "OKTA", "CYBR", "NET", "AKAM",
-        "QLYS", "RPD", "TENB", "VRNS", "CHKP", "GEN", "FFIV", "JNPR", "NTCT",
+        # Removed (delisted): CYBR (CyberArk -> Palo Alto/PANW),
+        # JNPR (Juniper -> HPE). PANW covers the gap.
+        "PANW", "CRWD", "FTNT", "ZS", "S", "OKTA", "NET", "AKAM",
+        "QLYS", "RPD", "TENB", "VRNS", "CHKP", "GEN", "FFIV", "NTCT",
     ],
     "fintech_payments": [
-        "V", "MA", "PYPL", "XYZ", "FI", "GPN", "AXP", "COF", "SOFI", "AFRM",
+        # FISV (Fiserv): Yahoo serves it as FISV here, not its newer "FI" ticker.
+        "V", "MA", "PYPL", "XYZ", "FISV", "GPN", "AXP", "COF", "SOFI", "AFRM",
         "UPST", "COIN", "HOOD", "NU", "TOST", "BILL", "FOUR", "WU", "GLOB", "MELI",
     ],
     "ev_auto": [
