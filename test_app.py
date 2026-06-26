@@ -288,43 +288,65 @@ def expect_classify_metric():
 
 
 def expect_famous_investors_offline():
-    """get_famous_holders matches by ticker and is resilient — empty/garbage input
-    and EDGAR failures return [] (never raise). Fully offline (monkeypatched, no
-    live EDGAR)."""
+    """get_famous_holders matches by ticker, computes % of portfolio + the
+    direction vs the previous 13F, and is resilient — empty/garbage input and
+    EDGAR failures return [] (never raise). Fully offline (monkeypatched)."""
+    fi = famous_investors
     # Empty / None symbol -> [] with NO network (short-circuits before any fetch).
-    assert famous_investors.get_famous_holders("", "id") == []
-    assert famous_investors.get_famous_holders(None, "id") == []
+    assert fi.get_famous_holders("", "id") == []
+    assert fi.get_famous_holders(None, "id") == []
 
-    real = famous_investors._fund_holdings
+    # _direction covers all four cases (pure, no network).
+    assert fi._direction(25.0, 20.0) == "up"
+    assert fi._direction(20.0, 25.0) == "down"
+    assert fi._direction(20.0, 20.05) == "flat"   # within the flat threshold
+    assert fi._direction(20.0, 19.95) == "flat"
+    assert fi._direction(20.0, None) == "new"
+
+    real = fi._fund_data
     try:
-        # Every fund's EDGAR fetch fails -> each is skipped, result [] (no raise).
-        famous_investors._HOLDINGS_CACHE.clear()
+        # Every fund's EDGAR fetch fails -> each skipped, result [] (no raise).
+        fi._FUND_CACHE.clear()
         def _boom(cik, identity):
             raise RuntimeError("EDGAR down")
-        famous_investors._fund_holdings = _boom
-        assert famous_investors.get_famous_holders("AAPL", "id") == []
+        fi._fund_data = _boom
+        assert fi.get_famous_holders("AAPL", "id") == []
 
-        # Matching logic with a FAKE holdings table (no network): AAPL is held,
-        # a bogus ticker is not.
-        fake = pd.DataFrame({
-            "Ticker": ["AAPL", "MSFT"],
-            "SharesPrnAmount": [1000, 2000],
-            "Value": [150000, 300000],
-        })
-        famous_investors._fund_holdings = lambda cik, identity: ("2026-03-31", fake)
-        hits = famous_investors.get_famous_holders("AAPL", "id")
-        assert len(hits) == len(famous_investors.FAMOUS_INVESTORS), \
+        # End-to-end with a FAKE two-filing bundle (no network): AAPL weight rose
+        # 20% -> 25% => 'up'; pct/prev_pct derived from value / fund total.
+        cur = pd.DataFrame({"Ticker": ["AAPL", "MSFT"], "Value": [250.0, 750.0],
+                            "SharesPrnAmount": [100, 50]})
+        prev = pd.DataFrame({"Ticker": ["AAPL", "MSFT"], "Value": [200.0, 800.0],
+                             "SharesPrnAmount": [80, 60]})
+        fi._fund_data = lambda cik, identity: {
+            "cur_period": "2026-03-31", "cur_total": 1000.0, "cur_table": cur,
+            "prev_period": "2025-12-31", "prev_total": 1000.0, "prev_table": prev}
+        hits = fi.get_famous_holders("AAPL", "id")
+        assert len(hits) == len(fi.FAMOUS_INVESTORS), \
             f"every tracked fund (fake AAPL holding) should hit, got {len(hits)}"
-        first = hits[0]
-        assert {"name", "fund", "shares", "value", "period"} <= set(first)
-        assert first["shares"] == 1000 and first["value"] == 150000
-        assert first["period"] == "2026-03-31"
+        h = hits[0]
+        assert {"name", "fund", "shares", "value", "period",
+                "pct_of_portfolio", "prev_pct", "direction"} <= set(h)
+        assert abs(h["pct_of_portfolio"] - 25.0) < 1e-9
+        assert abs(h["prev_pct"] - 20.0) < 1e-9
+        assert h["direction"] == "up"
+        assert h["shares"] == 100 and h["value"] == 250.0
+        assert h["period"] == "2026-03-31"
         # A ticker none of them hold -> empty.
-        assert famous_investors.get_famous_holders("ZZZZ", "id") == []
+        assert fi.get_famous_holders("ZZZZ", "id") == []
+
+        # MISSING previous filing -> prev_pct None, direction 'new', never raises.
+        fi._fund_data = lambda cik, identity: {
+            "cur_period": "2026-03-31", "cur_total": 1000.0, "cur_table": cur,
+            "prev_period": None, "prev_total": None, "prev_table": None}
+        new_hits = fi.get_famous_holders("AAPL", "id")
+        assert new_hits and new_hits[0]["prev_pct"] is None
+        assert new_hits[0]["direction"] == "new"
+        assert abs(new_hits[0]["pct_of_portfolio"] - 25.0) < 1e-9
     finally:
-        famous_investors._fund_holdings = real
-        famous_investors._HOLDINGS_CACHE.clear()
-    print("      famous investors: ticker match + empty/garbage/EDGAR-fail -> safe")
+        fi._fund_data = real
+        fi._FUND_CACHE.clear()
+    print("      famous investors: pct + direction (up/down/flat/new) + resilient")
 
 
 def expect_gemini_optional_offline():

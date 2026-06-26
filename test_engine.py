@@ -474,19 +474,23 @@ def expect_app_holders_no_data():
 
 def expect_app_famous_no_fetch_on_load():
     """The 'Famous investors holding this' expander + 'Check famous investors'
-    button render, and NOTHING fetches EDGAR on page load (only on click). A
-    tripwire monkeypatch makes any accidental fetch increment a counter — we
-    assert it stays 0, so the test never touches live EDGAR."""
+    button render, NOTHING fetches EDGAR on page load (only on click), and once
+    clicked the table shows the new '% of portfolio' / 'vs last filing' columns.
+    get_famous_holders is monkeypatched (fake data) so the test never touches
+    live EDGAR; a call counter proves the no-fetch-on-load behavior."""
     os.environ.setdefault("STOCKAPP_DISABLE_BROWSER_STORAGE", "1")
     import famous_investors as fi
     called = {"n": 0}
     real = fi.get_famous_holders
+    fake = [{"name": "Warren Buffett", "fund": "Berkshire Hathaway",
+             "shares": 100.0, "value": 250.0, "period": "2026-03-31",
+             "pct_of_portfolio": 25.0, "prev_pct": 20.0, "direction": "up"}]
 
-    def _tripwire(*a, **k):
+    def _fake(*a, **k):
         called["n"] += 1
-        return []
+        return fake
 
-    fi.get_famous_holders = _tripwire
+    fi.get_famous_holders = _fake
     try:
         from streamlit.testing.v1 import AppTest
         at = AppTest.from_file("app.py", default_timeout=90)
@@ -508,7 +512,22 @@ def expect_app_famous_no_fetch_on_load():
             "the 'Check famous investors' button should render"
         assert called["n"] == 0, \
             "must NOT fetch EDGAR on page load — only on a button click"
-        print("      famous investors: expander+button render; no EDGAR fetch on load")
+
+        # Click the button -> it fetches (once) and renders the table with the
+        # new columns. (Fake data, so still no live EDGAR.)
+        at.button(key="famous_btn").click().run()
+        assert not at.exception, f"app raised after click: {at.exception}"
+        assert called["n"] >= 1, "clicking should trigger the (mocked) fetch"
+        famous_df = None
+        for d in at.dataframe:
+            df = getattr(d, "value", None)
+            if df is not None and "% of portfolio" in list(getattr(df, "columns", [])):
+                famous_df = df
+                break
+        assert famous_df is not None, "famous table with '% of portfolio' should render"
+        assert "vs last filing" in list(famous_df.columns), \
+            "the 'vs last filing' column should render"
+        print("      famous investors: no fetch on load; click renders %/Δ columns")
     finally:
         fi.get_famous_holders = real
 

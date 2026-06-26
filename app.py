@@ -186,6 +186,20 @@ def get_edgar_identity():
         return _DEFAULT_EDGAR_IDENTITY
 
 
+def _famous_change_str(holder):
+    """Compact 'vs last filing' cell for a famous-holder row: an arrow + the
+    change in portfolio weight (percentage points), or NEW for a fresh position."""
+    direction = holder.get("direction")
+    pct = holder.get("pct_of_portfolio")
+    prev = holder.get("prev_pct")
+    if direction == "new" or prev is None:
+        return "NEW"
+    if pct is None:
+        return "—"
+    arrow = {"up": "↑", "down": "↓", "flat": "→"}.get(direction, "→")
+    return f"{arrow} {pct - prev:+.1f}pp"
+
+
 def _gemini_payload(symbol, verdict, company, technicals, analyst, divergence):
     """Shape the already-computed objects into a plain dict for the explainer.
     Every value is a display string already shown on the page; missing values
@@ -999,6 +1013,10 @@ if symbol:
                                        if h.get("shares") is not None else "n/a"),
                             "Value": (f"{h['value']:,.0f}"
                                       if h.get("value") is not None else "n/a"),
+                            "% of portfolio": (
+                                f"{h['pct_of_portfolio']:.1f}%"
+                                if h.get("pct_of_portfolio") is not None else "n/a"),
+                            "vs last filing": _famous_change_str(h),
                             "As of": h.get("period") or "n/a",
                         } for h in famous])
                         st.dataframe(ftable, hide_index=True, width="stretch")
@@ -1006,7 +1024,10 @@ if symbol:
                             "Tracked from quarterly **SEC 13F filings** (lagged up "
                             "to ~45 days), **US-listed securities only**, across a "
                             "curated ~10-investor list — not exhaustive, not "
-                            "real-time, and **not financial advice**."
+                            "real-time, and **not financial advice**. "
+                            "**% of portfolio** and **vs last filing** are derived "
+                            "from each fund's reported 13F totals across its two "
+                            "latest filings."
                         )
                     else:
                         st.caption("_None of the tracked investors report holding "
