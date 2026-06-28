@@ -107,7 +107,7 @@ class TestRowSchema(unittest.TestCase):
         "score_6m", "score_1y", "score_5y",
         "current_price",
         "analyst_mean_target", "analyst_implied_upside_pct",
-        "risk", "data_status", "as_of",
+        "risk", "data_status", "missing_fields", "as_of",
     }
     EXPECTED_RISK_KEYS = {"beta", "pct_below_52w_high", "debt_to_equity"}
 
@@ -154,6 +154,7 @@ class TestRowSchema(unittest.TestCase):
         pct = (160.0 - 136.0) / 160.0 * 100
         self.assertAlmostEqual(row["risk"]["pct_below_52w_high"], pct, places=4)
         self.assertEqual(row["data_status"], "ok")
+        self.assertEqual(row["missing_fields"], [])
         self.assertEqual(row["as_of"], AS_OF)
 
     def test_partial_when_no_analyst_target(self):
@@ -168,6 +169,21 @@ class TestRowSchema(unittest.TestCase):
         self.assertEqual(row["data_status"], "partial")
         self.assertIsNone(row["analyst_mean_target"])
         self.assertIsNone(row["analyst_implied_upside_pct"])
+        self.assertIn("analyst_mean_target", row["missing_fields"])
+        self.assertIn("analyst_implied_upside_pct", row["missing_fields"])
+
+    def test_ok_downgraded_to_partial_when_field_missing(self):
+        # beta is None but everything else is present — should become partial
+        verdict    = _fake_verdict()
+        analyst    = _fake_analyst()
+        technicals = _fake_technicals(beta=None)  # beta missing
+        company    = _fake_company()
+        quote      = _fake_quote()
+        patches = self._patch_all(verdict, analyst, technicals, company, quote)
+        with patches[0], patches[1], patches[2], patches[3], patches[4]:
+            row = _build_row(ENTRY_A, AS_OF)
+        self.assertEqual(row["data_status"], "partial")
+        self.assertIn("risk.beta", row["missing_fields"])
 
     def test_failed_when_verdict_not_found(self):
         verdict    = _fake_verdict(found=False)

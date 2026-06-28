@@ -13,6 +13,7 @@ import argparse
 import json
 import sys
 import time
+from collections import Counter
 from datetime import datetime, timezone
 
 import engine
@@ -24,6 +25,33 @@ from universe import get_universe
 
 SLEEP_BETWEEN = 1.0    # seconds between tickers (Yahoo throttle)
 RETRY_DELAYS  = [5, 15]  # seconds to wait before retry 1, retry 2
+
+# Fields that a fully-populated ("ok") row should have non-null.
+# Dot notation resolves into nested dicts (e.g. "risk.beta" -> row["risk"]["beta"]).
+EXPECTED_FIELDS = [
+    "current_price",
+    "analyst_mean_target",
+    "analyst_implied_upside_pct",
+    "score_6m", "score_1y", "score_5y",
+    "risk.beta",
+    "risk.pct_below_52w_high",
+    "risk.debt_to_equity",
+]
+
+
+def _get_nested(row: dict, dotted: str):
+    """Resolve 'risk.beta' against a row dict; return None if absent."""
+    cur = row
+    for part in dotted.split("."):
+        if not isinstance(cur, dict) or part not in cur:
+            return None
+        cur = cur[part]
+    return cur
+
+
+def compute_missing_fields(row: dict) -> list:
+    """Return expected fields that are null/absent in this row."""
+    return [f for f in EXPECTED_FIELDS if _get_nested(row, f) in (None, "", "N/A")]
 
 
 # ---------------------------------------------------------------------------
@@ -102,7 +130,7 @@ def _build_row(entry: dict, as_of: str) -> dict:
     else:
         data_status = "ok"
 
-    return {
+    row = {
         "symbol":   symbol,
         "regions":  regions,
         "themes":   themes,
@@ -120,6 +148,13 @@ def _build_row(entry: dict, as_of: str) -> dict:
         "data_status": data_status,
         "as_of":       as_of,
     }
+
+    # Fine-grained missing-field tracking: catch any gap the status check missed.
+    row["missing_fields"] = compute_missing_fields(row)
+    if row["data_status"] == "ok" and row["missing_fields"]:
+        row["data_status"] = "partial"
+
+    return row
 
 
 def _score_one(entry: dict, as_of: str) -> dict:
@@ -195,18 +230,26 @@ def run_scan(universe: list, out_path: str = "screen_results.json") -> None:
     except Exception as exc:
         print(f"\nERROR writing {out_path}: {exc}")
 
-    # Summary.
-    ok_count      = sum(1 for r in rows if r["data_status"] == "ok")
-    partial_count = sum(1 for r in rows if r["data_status"] == "partial")
-    failed_count  = len(failed_syms)
+    # Summary + degradation rollup.
+    status_counts = Counter(r["data_status"] for r in rows)
+    field_failures = Counter()
+    for r in rows:
+        field_failures.update(r.get("missing_fields", []))
+
     print("\n" + "=" * 60)
-    print(f"SCAN COMPLETE  total={total}  ok={ok_count}  "
-          f"partial={partial_count}  failed={failed_count}  "
+    print(f"SCAN COMPLETE  total={total}  ok={status_counts['ok']}  "
+          f"partial={status_counts['partial']}  failed={status_counts['failed']}  "
           f"elapsed={elapsed_total:.1f}s")
     if failed_syms:
         print(f"Failed symbols: {', '.join(failed_syms)}")
     else:
         print("No failures.")
+    print("\n=== degradation rollup ===")
+    print("missing-field counts (most common first):")
+    for field_name, n in field_failures.most_common():
+        print(f"  {field_name:32s} {n}")
+    if not field_failures:
+        print("  (none -- every row fully populated)")
     print("=" * 60)
 
 
