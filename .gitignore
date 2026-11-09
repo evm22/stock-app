@@ -36,3 +36,6 @@ Thumbs.db
 
 # --- Screener output (large data file; not committed) ---
 screen_results.json
+
+# --- App data kept locally until the private data repo is connected ---
+local_data/

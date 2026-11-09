@@ -58,6 +58,13 @@ def compute_missing_fields(row: dict) -> list:
 # Row builder
 # ---------------------------------------------------------------------------
 
+def _num_score(hv):
+    """A HorizonVerdict's 0..100 score rounded to 1 decimal, or None."""
+    if hv is None or not hv.enough_data or not engine._is_number(hv.score):
+        return None
+    return round(float(hv.score), 1)
+
+
 def _build_row(entry: dict, as_of: str) -> dict:
     """Score one universe entry; return a result row.  Never raises."""
     symbol  = entry["symbol"]
@@ -68,6 +75,9 @@ def _build_row(entry: dict, as_of: str) -> dict:
     verdict = engine.compute_verdict(symbol)
 
     score_6m = score_1y = score_5y = None
+    # Numeric 0..100 scores (same scale as the app's verdict tiles). Kept next
+    # to the labels so the daily job can store a score history over time.
+    score_6m_num = score_1y_num = score_5y_num = None
     if verdict.found and verdict.horizons:
         hv6  = verdict.horizons.get("6M")
         hv1  = verdict.horizons.get("1Y")
@@ -75,6 +85,9 @@ def _build_row(entry: dict, as_of: str) -> dict:
         score_6m = hv6.label if (hv6 and hv6.enough_data) else None
         score_1y = hv1.label if (hv1 and hv1.enough_data) else None
         score_5y = hv5.label if (hv5 and hv5.enough_data) else None
+        score_6m_num = _num_score(hv6)
+        score_1y_num = _num_score(hv1)
+        score_5y_num = _num_score(hv5)
 
     # --- analyst consensus ---
     analyst = engine.get_analyst_consensus(symbol)
@@ -137,6 +150,9 @@ def _build_row(entry: dict, as_of: str) -> dict:
         "score_6m": score_6m,
         "score_1y": score_1y,
         "score_5y": score_5y,
+        "score_6m_num": score_6m_num,
+        "score_1y_num": score_1y_num,
+        "score_5y_num": score_5y_num,
         "current_price":              current_price,
         "analyst_mean_target":        analyst_mean_target,
         "analyst_implied_upside_pct": analyst_implied_upside,
@@ -178,6 +194,7 @@ def _score_one(entry: dict, as_of: str) -> dict:
             "regions":  entry.get("regions", []),
             "themes":   entry.get("themes", []),
             "score_6m": None, "score_1y": None, "score_5y": None,
+            "score_6m_num": None, "score_1y_num": None, "score_5y_num": None,
             "current_price": None,
             "analyst_mean_target": None,
             "analyst_implied_upside_pct": None,
@@ -192,7 +209,7 @@ def _score_one(entry: dict, as_of: str) -> dict:
 # Main scan loop
 # ---------------------------------------------------------------------------
 
-def run_scan(universe: list, out_path: str = "screen_results.json") -> None:
+def run_scan(universe: list, out_path: str = "screen_results.json") -> dict:
     total      = len(universe)
     rows       = []
     failed_syms = []
@@ -251,6 +268,7 @@ def run_scan(universe: list, out_path: str = "screen_results.json") -> None:
     if not field_failures:
         print("  (none -- every row fully populated)")
     print("=" * 60)
+    return result
 
 
 # ---------------------------------------------------------------------------

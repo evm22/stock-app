@@ -27,6 +27,7 @@ except Exception:
 # (browser-blocking) component out of the way when there's no real Streamlit
 # server, exactly like AppTest does. Set it BEFORE importing app.
 os.environ.setdefault("STOCKAPP_DISABLE_BROWSER_STORAGE", "1")
+os.environ.setdefault("STOCKAPP_DISABLE_PASSWORD", "1")  # never lock the app under test
 
 import pandas as pd
 
@@ -452,6 +453,27 @@ def expect_universe_structure():
           f"NVDA themes={sorted(nv)}")
 
 
+def test_password_gate():
+    """The password lock: constant-time compare, and OFF when no password set."""
+    assert app.password_ok("abc", "abc")
+    assert not app.password_ok("abd", "abc")
+    assert not app.password_ok("", "abc")
+    assert not app.password_ok(None, "abc")
+    assert not app.password_ok("abc", None)  # no password configured -> never "ok"
+    assert app.password_ok("סיסמה", "סיסמה")  # Hebrew passwords work
+    # The test seam forces "no password" even if a local secrets file has one.
+    os.environ["STOCKAPP_DISABLE_PASSWORD"] = "1"
+    try:
+        assert app.get_app_password() is None
+    finally:
+        os.environ.pop("STOCKAPP_DISABLE_PASSWORD", None)
+    # Without a data repo configured the app uses the local data folder.
+    repo, token = app.get_data_store_config()
+    import data_store
+    if not (repo and token):
+        assert data_store.backend_name(repo, token) == "local"
+
+
 def main():
     print("Running app display tests (no network)...\n")
     results = [
@@ -475,6 +497,8 @@ def main():
               expect_holders_resilient_offline),
         check("famous investors: ticker match + resilient (no network)",
               expect_famous_investors_offline),
+        check("password gate: compare + off when not configured (no network)",
+              test_password_gate),
         check("universe: theme/region tagging + merge + mocked fetch (no network)",
               expect_universe_structure),
     ]

@@ -21,6 +21,7 @@ import sys
 # touch Gemini (network/quota/key) even though a real secrets.toml may exist
 # locally. Must be set before app.py is imported by AppTest. See app.get_gemini_key.
 os.environ.setdefault("STOCKAPP_DISABLE_GEMINI", "1")
+os.environ.setdefault("STOCKAPP_DISABLE_PASSWORD", "1")  # never lock the app under test
 
 import pandas as pd
 import yfinance as yf  # for the Hebrew-alias English-name fallback search

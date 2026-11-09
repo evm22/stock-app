@@ -75,6 +75,9 @@ The data logic lives in `engine.py` (pure Python, no Streamlit); the UI in
 ```bash
 venv\Scripts\python test_engine.py   # engine vs live Yahoo (needs internet)
 venv\Scripts\python test_app.py      # chart builder, no network (fast)
+venv\Scripts\python test_scan.py     # screener rows, no network
+venv\Scripts\python test_data_store.py  # data store (local + mocked GitHub)
+venv\Scripts\python test_daily_job.py   # daily run: time guard, score history
 ```
 
 Each prints a plain-text `PASS`/`FAIL` per check and exits `0` if everything
@@ -86,3 +89,28 @@ Never commit API keys or secrets to this repository. When we need them later,
 we'll use [Streamlit secrets](https://docs.streamlit.io/develop/concepts/connections/secrets-management)
 (a local `.streamlit/secrets.toml` file, which is git-ignored, and the secrets
 manager in Streamlit Community Cloud for deployment).
+
+Optional secrets the app understands (all can be left out; the app then works
+exactly as before):
+
+| Secret | What it does |
+|---|---|
+| `APP_PASSWORD` | Locks the app behind a password screen |
+| `DATA_REPO`, `DATA_REPO_TOKEN` | Saves the app's own data in a **private** GitHub repo instead of the local `local_data/` folder |
+
+## Daily automatic run
+
+`daily_job.py` runs the screener once a day, saves `screen_results.json`, and
+appends each stock's numeric scores + price to `score_history.csv` (for
+"was the score right?" later). It only runs from 07:00 Israel time and once per
+day, and sends a Telegram summary if `TELEGRAM_BOT_TOKEN` / `TELEGRAM_CHAT_ID`
+are set.
+
+```bash
+venv\Scripts\python daily_job.py --limit 5 --force   # quick local test -> local_data/
+```
+
+The GitHub Actions workflow that runs it every morning is kept as a template in
+`deploy/stock-app-data/`. It is meant for the private data repo and is **not**
+active in this public repo (GitHub only runs workflows under `.github/`).
+`keep_awake.py` (used by that workflow) visits the live app so it isn't asleep.

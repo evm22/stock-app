@@ -10,6 +10,7 @@ Run locally with:
     streamlit run app.py
 """
 
+import hmac
 import json
 import os
 
@@ -23,6 +24,58 @@ import famous_investors  # famous-investor 13F holdings from SEC EDGAR (no key)
 
 # Basic page configuration (title shown in the browser tab, etc.).
 st.set_page_config(page_title="Stock Analysis App", page_icon="📈")
+
+
+def _secret(name):
+    """Read an optional secret; None if missing (or no secrets file at all)."""
+    try:
+        return st.secrets.get(name, None)
+    except Exception:
+        return None
+
+
+def get_app_password():
+    """The app password, or None when none is configured (then there's no lock).
+
+    STOCKAPP_DISABLE_PASSWORD is a test seam (like STOCKAPP_DISABLE_GEMINI):
+    when set, the lock is skipped even if a password exists locally."""
+    if os.environ.get("STOCKAPP_DISABLE_PASSWORD"):
+        return None
+    return _secret("APP_PASSWORD")
+
+
+def get_data_store_config():
+    """(repo, token) of the PRIVATE data repo, or (None, None) when not set up
+    yet — data_store then keeps everything in the local_data folder."""
+    return _secret("DATA_REPO"), _secret("DATA_REPO_TOKEN")
+
+
+def password_ok(entered, expected):
+    """Constant-time comparison, so the check doesn't leak timing hints."""
+    if not expected or entered is None:
+        return False
+    return hmac.compare_digest(str(entered).encode("utf-8"), str(expected).encode("utf-8"))
+
+
+def require_password():
+    """Lock the whole app behind APP_PASSWORD (only if one is configured).
+    Success is remembered for this browser session."""
+    expected = get_app_password()
+    if not expected or st.session_state.get("auth_ok"):
+        return
+    st.markdown("### 🔒 כניסה")
+    entered = st.text_input("סיסמה", type="password", key="app_password_input")
+    if entered:
+        if password_ok(entered, expected):
+            st.session_state["auth_ok"] = True
+            st.session_state.pop("app_password_input", None)
+            st.rerun()
+        else:
+            st.error("הסיסמה לא נכונה. נסה שוב.")
+    st.stop()
+
+
+require_password()
 
 # --- Compact metric tiles (PURE STYLING) ---------------------------------
 # st.metric has no built-in "small" size, so we shrink the value font (~2rem ->

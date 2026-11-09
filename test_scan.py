@@ -105,6 +105,7 @@ class TestRowSchema(unittest.TestCase):
     EXPECTED_KEYS = {
         "symbol", "regions", "themes",
         "score_6m", "score_1y", "score_5y",
+        "score_6m_num", "score_1y_num", "score_5y_num",
         "current_price",
         "analyst_mean_target", "analyst_implied_upside_pct",
         "risk", "data_status", "missing_fields", "as_of",
@@ -285,6 +286,43 @@ class TestBatchBehavior(unittest.TestCase):
             self.assertEqual(len(data["rows"]), 2)
         finally:
             os.unlink(out_path)
+
+
+class TestNumericScores(unittest.TestCase):
+    """score_*_num carry the 0..100 score next to the label (for score history)."""
+
+    def _row(self, verdict):
+        with patch("scan.engine.compute_verdict",      return_value=verdict), \
+             patch("scan.engine.get_analyst_consensus", return_value=_fake_analyst()), \
+             patch("scan.engine.get_stock_technicals",  return_value=_fake_technicals()), \
+             patch("scan.engine.get_company_metrics",   return_value=_fake_company()), \
+             patch("scan.engine.get_stock_quote",       return_value=_fake_quote()):
+            return _build_row(ENTRY_A, AS_OF)
+
+    def test_numeric_scores_present(self):
+        row = self._row(_fake_verdict())
+        self.assertEqual(row["score_6m_num"], 60.0)
+        self.assertEqual(row["score_1y_num"], 50.0)
+        self.assertEqual(row["score_5y_num"], 80.0)
+        # Labels are unchanged.
+        self.assertEqual(row["score_1y"], "Hold")
+
+    def test_not_enough_data_gives_none(self):
+        v = _fake_verdict()
+        v.horizons["5Y"] = engine.HorizonVerdict("5Y", enough_data=False)
+        row = self._row(v)
+        self.assertIsNone(row["score_5y_num"])
+        self.assertIsNone(row["score_5y"])
+
+    def test_rounded_to_one_decimal(self):
+        v = _fake_verdict()
+        v.horizons["1Y"].score = 63.456
+        self.assertEqual(self._row(v)["score_1y_num"], 63.5)
+
+    def test_failed_verdict_has_none(self):
+        row = self._row(_fake_verdict(found=False))
+        for k in ("score_6m_num", "score_1y_num", "score_5y_num"):
+            self.assertIsNone(row[k])
 
 
 if __name__ == "__main__":
