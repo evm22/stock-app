@@ -29,6 +29,7 @@ import buy_score  # 50% engine + 30% analysts + 20% AI news -> -100..+100
 import news  # latest headlines from free sources (Yahoo, Google News RSS)
 import ai_insights  # numbers behind the AI overview / picks (pure Python)
 import benchmark  # portfolio vs TA-125 / S&P 500 with the same money on the same days
+import events  # this week's earnings reports and dividends (Yahoo calendar)
 
 # Basic page configuration (title shown in the browser tab, etc.).
 st.set_page_config(page_title="המניות שלי", page_icon="📈",
@@ -88,9 +89,9 @@ h1, h2, h3, h4 { font-family: "Rubik", "Assistant", system-ui, sans-serif !impor
   background: var(--sa-surface2); border-radius: 14px; padding: 0.45rem 0.7rem; }
 
 /* Watchlist rows on the home screen: full-width buttons that read as list rows. */
-.st-key-watchlist button, .st-key-portfolio_rows button, [class*="st-key-picks_"] button { justify-content: flex-start; text-align: right; border-radius: 14px;
+.st-key-watchlist button, .st-key-portfolio_rows button, [class*="st-key-picks_"] button, .st-key-week_events button { justify-content: flex-start; text-align: right; border-radius: 14px;
   background: var(--sa-surface); border: 1px solid var(--sa-line); padding: 0.7rem 0.9rem; }
-.st-key-watchlist button p, .st-key-portfolio_rows button p, [class*="st-key-picks_"] button p { font-size: 1rem; white-space: pre-line; line-height: 1.45; }
+.st-key-watchlist button p, .st-key-portfolio_rows button p, [class*="st-key-picks_"] button p, .st-key-week_events button p { font-size: 1rem; white-space: pre-line; line-height: 1.45; }
 .sa-warn { color: var(--sa-hold); font-size: 0.8rem; margin-top: 0.5rem; }
 
 /* Small HTML cards. */
@@ -1279,6 +1280,7 @@ def render_portfolio_home():
         return
     rows, names = portfolio_rows(holdings)
     st.markdown(portfolio_card_html(portfolio.summarize(rows)), unsafe_allow_html=True)
+    render_week_events(holdings, names)
     with st.container(key="portfolio_rows"):
         for r in rows:
             sym = r["symbol"]
@@ -1292,6 +1294,46 @@ def render_portfolio_home():
             st.button(label, key=f"pf_view_{sym}", on_click=_goto, args=(sym,),
                       width="stretch")
     render_portfolio_overview(rows, names, data)
+
+
+# --- This week in my portfolio (mockup item 19) ---------------------------
+
+@st.cache_data(ttl=6 * 3600)
+def load_calendar(symbol):
+    return events.fetch_calendar(symbol)
+
+
+def render_week_events(holdings, names):
+    """Earnings reports and dividends in the next 7 days, at the top of home."""
+    qty = {h["symbol"]: h["qty"] for h in holdings}
+    cals = {sym: load_calendar(sym) for sym in qty}
+    items = events.upcoming(cals, qty)
+    with st.container(border=True, key="week_events"):
+        st.markdown('<h4 style="margin:0">השבוע בתיק <span class="sa-sub" '
+                    'style="font-weight:400">דוחות ודיבידנדים</span></h4>',
+                    unsafe_allow_html=True)
+        if not items:
+            nxt = events.next_event(cals)
+            msg = "אין השבוע דוחות או דיבידנדים במניות שבתיק."
+            if nxt:
+                d, sym, kind = nxt
+                msg += (f" הבא בתור: {kind} של ⁨{md_safe(names.get(sym, sym))}⁩ "
+                        f"ב-⁦{d:%d.%m.%Y}⁩.")
+            st.caption(msg)
+            return
+        usd = load_fx("USD")
+        for i, e in enumerate(items):
+            sym = e["symbol"]
+            label = f"**{e['when']}** · {md_safe(names.get(sym, sym))}\n{e['what']}"
+            if e["amount"]:
+                value, cur = e["amount"]
+                label += f" · :green[\u2066{md_safe(portfolio.money(value, cur))}\u2069 לך"
+                if usd:
+                    label += f" (≈ \u2066{md_safe(portfolio.money(value * usd, 'ILS', 0))}\u2069)"
+                label += "]"
+            st.button(label, key=f"ev_{i}_{sym}", on_click=_goto, args=(sym,), width="stretch")
+        st.caption("לפי לוח האירועים של Yahoo. תאריכים יכולים לזוז, וסכום דיבידנד מוצג "
+                   "רק למניות בארה״ב (לפי הדיבידנד האחרון, לפני מס).")
 
 
 # --- Portfolio overview (mockup item 14) ----------------------------------

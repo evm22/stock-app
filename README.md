@@ -105,6 +105,11 @@ number, the AI only writes words):
 - *מבט על התיק* (home, under the portfolio): weights, the biggest position,
   share in Israel and the value-weighted average buy score; "נתח את התיק עם
   AI" adds strengths / weaknesses / ideas (one Gemini call, cached 24 h).
+- *השבוע בתיק* (home, under the portfolio total, `events.py`): earnings
+  reports, ex-dividend and dividend payment dates in the next 7 days for the
+  stocks I hold, from Yahoo's free calendar (cached 6 h). A "≈ $X for you"
+  amount only for US stocks (Yahoo's .TA dividend units are unreliable).
+  Nothing this week -> the next event of any kind.
 - *מול המדד* (inside that card, `benchmark.py`): the portfolio vs TA-125
   (`^TA125.TA`) or the S&P 500 (`^GSPC`) over the last year, as a shadow
   portfolio: the same ₪ on the same days into the index, and a sale of X% of
@@ -163,6 +168,7 @@ venv\Scripts\python test_portfolio_ui.py # portfolio screens on sample data (App
 venv\Scripts\python test_buy_score.py    # buy score, news parsing, AI reply parsing, score in app (offline)
 venv\Scripts\python test_ai_insights.py  # portfolio facts, AI picks (code fallback), both screens (offline)
 venv\Scripts\python test_benchmark.py    # portfolio vs index (shadow portfolio) + the app block (offline)
+venv\Scripts\python test_events.py       # this week's reports/dividends + the home card (offline)
 venv\Scripts\python test_rank.py     # screener ranking + resume, no network
 ```
 

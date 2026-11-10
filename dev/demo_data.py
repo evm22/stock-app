@@ -199,9 +199,24 @@ def fake_headlines(symbol, name="", limit=5):
             for i in range(1, 4)][:limit]
 
 
+# FAKE calendars, relative to the real today so "this week" is never empty.
+def fake_calendar(symbol):
+    from datetime import date, timedelta
+    t = date.today()
+    cal = {"AAPL": {"earnings": t + timedelta(days=40), "ex_dividend": t + timedelta(days=2),
+                    "dividend_pay": t + timedelta(days=6), "dividend_per_share": 0.27},
+           "NVDA": {"earnings": t + timedelta(days=3)},
+           "TEVA.TA": {"earnings": t + timedelta(days=30)}}.get(symbol, {})
+    out = {"earnings": None, "ex_dividend": None, "dividend_pay": None, "dividend_per_share": None}
+    out.update({k: (v.isoformat() if hasattr(v, "isoformat") else v) for k, v in cal.items()})
+    return out
+
+
 def install():
-    """Point the engine (and the news fetcher) at the fake data."""
+    """Point the engine (and the news fetcher, the calendar) at the fake data."""
     for name in FAKES:
         setattr(engine, name, globals()[name])
     import news
     news.fetch_headlines = fake_headlines
+    import events
+    events.fetch_calendar = fake_calendar
