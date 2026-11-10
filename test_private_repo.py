@@ -63,6 +63,8 @@ class _FakeRepo:
 
     def __enter__(self):
         folder, (rd, wr) = self.folder, self.orig
+        # app.py reloads a module without a file stamp, which would undo this patch.
+        data_store._file_mtime = os.path.getmtime(data_store.__file__)
         data_store.read_text = lambda path, **kw: rd(path, local_dir=folder)
         data_store.write_text = lambda path, text, message="", **kw: wr(path, text, local_dir=folder)
         return self
