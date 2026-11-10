@@ -89,7 +89,16 @@ into "opening" trades automatically, once. The watchlist is saved in the
 browser too. Because Safari on iPhone wipes site data after ~7 days without
 a visit, the home screen has **גיבוי ושחזור**: download a backup file or copy
 its text, restore from a file or pasted text, and a reminder shows when there
-is data and no backup in the last 6 days. Colors live in `.streamlit/config.toml`, the layout CSS at
+is data and no backup in the last 6 days.
+
+**Buy score** (`buy_score.py`, −100..+100) next to every stock on the stock
+page and in the portfolio / watchlist rows: 50% our engine (1-year verdict)
++ 30% the analysts (rating + mean price target) + 20% AI reading the news.
+"איך חושב הציון?" shows each part and the exact formula; a missing part is
+left out and the others re-weighted. The AI part runs only on the button
+(one Gemini call, cached server-wide for 12 hours) to protect the free
+quota. Headlines come from free sources only (`news.py`: Yahoo, else Google
+News RSS -- headlines and links, no article text). Colors live in `.streamlit/config.toml`, the layout CSS at
 the top of `app.py`. Some engine texts (signal names, tooltips) are still
 English.
 
@@ -133,6 +142,7 @@ venv\Scripts\python test_data_store.py  # data store (local + mocked GitHub)
 venv\Scripts\python test_daily_job.py   # daily run: guard, history, ranking, Telegram (mocked)
 venv\Scripts\python test_portfolio.py    # portfolio math: trades, P/L, tax, backup, reminder (offline)
 venv\Scripts\python test_portfolio_ui.py # portfolio screens on sample data (AppTest, offline)
+venv\Scripts\python test_buy_score.py    # buy score, news parsing, AI reply parsing, score in app (offline)
 venv\Scripts\python test_rank.py     # screener ranking + resume, no network
 ```
 

@@ -148,3 +148,72 @@ def explain_verdict(structured_data, api_key, depth="quick"):
         # ANY failure -> log quietly and behave as if the feature is off.
         logger.warning("Gemini: explain_verdict failed (%s)", error)
         return None
+
+
+
+# --- News rating for the buy score (mockup item 12: "AI על החדשות", 20%) ---
+
+def _news_prompt(symbol, name, headlines):
+    lines = "\n".join(f"- {h.get('title','')} ({h.get('source','')})" for h in headlines)
+    return (
+        "You rate recent news for ONE stock for a private investor.\n"
+        f"Stock: {name or symbol} ({symbol}).\n"
+        "Headlines (title, source):\n" + lines + "\n\n"
+        "Judge ONLY from these headlines how they likely affect the stock over the "
+        "next months. Be calibrated: ordinary news is usually within -40..40; use "
+        "beyond +-70 only for truly company-changing events, and 0 for mixed or "
+        "irrelevant headlines. Answer with JSON only, no markdown:\n"
+        '{"score": <integer -100 (very negative) .. 100 (very positive), 0 = neutral>, '
+        '"reason": "<one short sentence in Hebrew explaining why>"}'
+    )
+
+
+def parse_news_rating(text):
+    """Gemini's reply -> (score int -100..100, reason str) or None. Tolerates
+    ```json fences and extra text around the JSON object."""
+    import json as _json
+    import re as _re
+    if not text:
+        return None
+    m = _re.search(r"\{.*\}", text, _re.S)
+    if not m:
+        return None
+    try:
+        obj = _json.loads(m.group(0))
+        score = int(round(float(obj.get("score"))))
+    except (ValueError, TypeError, AttributeError):
+        return None
+    reason = str(obj.get("reason") or "").strip()
+    return max(-100, min(100, score)), reason
+
+
+def rate_news(symbol, name, headlines, api_key):
+    """(score, reason_he) from Gemini for these headlines, or None (no key, no
+    headlines, or any failure). One small call; never raises."""
+    if not api_key or not headlines:
+        return None
+    try:
+        import google.generativeai as genai
+        genai.configure(api_key=api_key)
+        candidates = []
+        selected = _select_flash_model(genai)
+        if selected:
+            candidates.append(selected)
+        candidates += [n for n in _FALLBACK_MODELS if n not in candidates]
+        prompt = _news_prompt(symbol, name, headlines)
+        for model_name in candidates:
+            try:
+                model = genai.GenerativeModel(
+                    model_name, generation_config={"temperature": 0.1,
+                                                   "max_output_tokens": 2048})
+                response = model.generate_content(
+                    prompt, request_options={"timeout": _REQUEST_TIMEOUT_S})
+                parsed = parse_news_rating(getattr(response, "text", "") or "")
+                if parsed:
+                    return parsed
+            except Exception as error:
+                logger.warning("Gemini: news rating with %s failed (%s)", model_name, error)
+        return None
+    except Exception as error:
+        logger.warning("Gemini: rate_news failed (%s)", error)
+        return None

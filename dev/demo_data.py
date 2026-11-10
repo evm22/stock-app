@@ -169,7 +169,19 @@ FAKES = ("get_stock_quote", "find_tickers", "get_price_history", "get_company_me
          "get_institutional_holders")
 
 
+def fake_headlines(symbol, name="", limit=5):
+    """FAKE sample headlines (no network)."""
+    if symbol not in SAMPLE:
+        return []
+    nm = SAMPLE[symbol]["name"]
+    return [{"title": f"{nm}: sample headline {i}", "source": "Demo News",
+             "published": "2026-11-10T06:00:00+00:00", "link": ""}
+            for i in range(1, 4)][:limit]
+
+
 def install():
-    """Point the engine at the fake data (until the process ends)."""
+    """Point the engine (and the news fetcher) at the fake data."""
     for name in FAKES:
         setattr(engine, name, globals()[name])
+    import news
+    news.fetch_headlines = fake_headlines

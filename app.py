@@ -25,6 +25,8 @@ import gemini_helper  # OPTIONAL Gemini explanation layer (no-op without a key)
 import famous_investors  # famous-investor 13F holdings from SEC EDGAR (no key)
 import data_store  # where our own data lives (local folder now, private repo later)
 import portfolio  # the user's trades -> holdings, P&L, tax, totals in ₪ (pure Python)
+import buy_score  # 50% engine + 30% analysts + 20% AI news -> -100..+100
+import news  # latest headlines from free sources (Yahoo, Google News RSS)
 
 # Basic page configuration (title shown in the browser tab, etc.).
 st.set_page_config(page_title="המניות שלי", page_icon="📈",
@@ -614,8 +616,10 @@ def _remove_watchlist(symbol):
 
 
 def _goto(symbol):
-    """A 'View' click pre-fills the search box on the next rerun."""
+    """A row tap pre-fills the search box on the next rerun -- with an EXACT
+    symbol, so the page opens that stock instead of asking 'which one?'."""
     st.session_state["pending_query"] = symbol
+    st.session_state["exact_symbol"] = symbol
 
 
 # --- Portfolio: the trades, kept with data_store --------------------------
@@ -1262,8 +1266,150 @@ def render_portfolio_home():
             if r["pnl_pct"] is not None:
                 color = "green" if r["pnl_pct"] >= 0 else "red"
                 label += f" · :{color}[\u2066{r['pnl_pct']:+.1f}%\u2069]"
+            label += score_tag(score_for(sym))
             st.button(label, key=f"pf_view_{sym}", on_click=_goto, args=(sym,),
                       width="stretch")
+
+
+# --- Buy score (mockup items 12-13) -------------------------------------
+
+AI_NEWS_TTL_H = 12   # one Gemini news call per stock per 12 hours, at most
+
+
+@st.cache_data(ttl=1800)
+def load_news(symbol, name):
+    return news.fetch_headlines(symbol, name, limit=5)
+
+
+@st.cache_resource
+def _ai_news_store():
+    """Server-wide memory of AI news ratings: symbol -> {score, reason, at}.
+    Shared by every page and visitor so a rating is reused, not re-bought."""
+    return {}
+
+
+def ai_news_rating(symbol):
+    """The cached AI news rating for `symbol` if it is fresh, else None."""
+    item = _ai_news_store().get(symbol)
+    if not item:
+        return None
+    age_h = (datetime.now() - item["at"]).total_seconds() / 3600
+    return item if age_h < AI_NEWS_TTL_H else None
+
+
+def _run_ai_news(symbol, name):
+    """Button callback: read the headlines with Gemini (one call), store it."""
+    key = get_gemini_key()
+    heads = load_news(symbol, name)
+    result = gemini_helper.rate_news(symbol, name, heads, key) if key else None
+    if result:
+        _ai_news_store()[symbol] = {"score": result[0], "reason": result[1],
+                                    "at": datetime.now()}
+    else:
+        st.session_state["_ai_news_failed"] = symbol
+
+
+def score_for(symbol, verdict=None, analyst=None):
+    """The buy score dict for a symbol (loads verdict/analyst if not given)."""
+    try:
+        verdict = verdict if verdict is not None else load_verdict(symbol)
+    except Exception:
+        verdict = None
+    try:
+        analyst = analyst if analyst is not None else load_analyst(symbol)
+    except Exception:
+        analyst = None
+    ai = ai_news_rating(symbol)
+    return buy_score.from_engine_objects(verdict, analyst, ai["score"] if ai else None)
+
+
+def score_tag(score):
+    """' · ציון +34' (colored) for list rows, or '' when there is no score."""
+    if not score or score["score"] is None:
+        return ""
+    color = {"up": "green", "down": "red"}.get(score["cls"], "orange")
+    return f" · :{color}[ציון \u2066{score['score']:+d}\u2069]"
+
+
+PART_NAMES = {"engine": ("המנוע שלנו", "16 סימנים מהנתונים, תחזית לשנה"),
+              "analysts": ("אנליסטים", "דירוג ויעד מחיר ממוצע (Yahoo)"),
+              "ai": ("AI על החדשות", "Gemini קורא את הכותרות האחרונות")}
+
+
+def score_card_html(score):
+    """The buy-score card: big number, lean label, a -100..+100 bar."""
+    if score["score"] is None:
+        return '<div class="sa-card"><div class="sa-eyebrow">ציון קנייה</div>אין מספיק נתונים.</div>'
+    n, cls = score["score"], score["cls"]
+    pos = (n + 100) / 2
+    return (
+        '<div class="sa-card"><div class="sa-verdict"><div>'
+        '<div class="sa-eyebrow">ציון קנייה</div>'
+        f'<div class="sa-word sa-num" style="color:var(--sa-{cls})">{n:+d}</div></div>'
+        f'<span class="sa-chip sa-{cls}">{_esc(score["label"])}</span></div>'
+        '<div style="position:relative;height:10px;border-radius:99px;margin:14px 4px 6px;'
+        'direction:ltr;background:linear-gradient(90deg,var(--sa-down),var(--sa-hold),var(--sa-up));opacity:.85">'
+        f'<span style="position:absolute;top:50%;left:{pos:.1f}%;width:16px;height:16px;'
+        'border-radius:50%;background:var(--sa-fg);border:3px solid var(--sa-surface);'
+        'transform:translate(-50%,-50%)"></span></div>'
+        '<div class="sa-sub" style="display:flex;justify-content:space-between;direction:ltr">'
+        '<span>-100 מכירה</span><span>0</span><span>קנייה +100</span></div></div>'
+    )
+
+
+def render_score_section(symbol, name, verdict, analyst):
+    """Stock page: the buy-score card + 'how was it calculated' + AI news part."""
+    score = score_for(symbol, verdict, analyst)
+    st.markdown(score_card_html(score), unsafe_allow_html=True)
+    ai = ai_news_rating(symbol)
+    with st.expander("איך חושב הציון?", expanded=False):
+        for p in score["parts"]:
+            title, desc = PART_NAMES[p["key"]]
+            if p["key"] == "ai" and ai and ai.get("reason"):
+                desc = ai["reason"]
+            if p["value"] is None:
+                val = "—"
+                desc += " · לא נכלל" if p["key"] != "ai" else " · עוד לא הופעל"
+            else:
+                val = f"{p['value']:+d}"
+            st.markdown(f"<b>{_esc(title)}</b> · {p['weight']*100:.0f}% · "
+                        f"<b class='sa-num'>{_esc(val)}</b><br>"
+                        f"<span class='sa-sub'>{_esc(desc)}</span>",
+                        unsafe_allow_html=True)
+        if score["formula"]:
+            st.code(score["formula"], language=None, wrap_lines=True)
+        if score["missing"]:
+            st.caption("חלק שחסר לא נספר, והמשקלים של השאר מתחלקים מחדש ל-100%.")
+        if ai is None:
+            no_key = not get_gemini_key()
+            st.button("🤖 קרא את החדשות עם AI", key=f"ai_news_{symbol}",
+                      on_click=_run_ai_news, args=(symbol, name), disabled=no_key,
+                      help="צריך מפתח Gemini" if no_key else
+                      "קריאה אחת ל-Gemini, נשמרת ל-12 שעות", width="stretch")
+            if st.session_state.pop("_ai_news_failed", None) == symbol:
+                st.caption("_ה-AI לא הצליח לקרוא את החדשות כרגע. נסה שוב מאוחר יותר._")
+        st.caption("הציון מחושב בקוד. ה-AI רק מוסיף את חלק החדשות ומסביר אותו. "
+                   "לא ייעוץ השקעות.")
+
+
+def render_news_section(symbol, name):
+    """3 latest headlines with source and age (mockup item 18), AI line on top."""
+    heads = load_news(symbol, name)
+    with st.container(border=True):
+        st.markdown("#### חדשות")
+        ai = ai_news_rating(symbol)
+        if ai and ai.get("reason"):
+            st.markdown(f"**AI ·** {_esc(ai['reason'])}", unsafe_allow_html=True)
+        if not heads:
+            st.caption("לא נמצאו כותרות מהשבוע האחרון.")
+            return
+        for h in heads[:3]:
+            meta = " · ".join(x for x in (h.get("source"), news.age_he(h.get("published"))) if x)
+            title = md_safe(h["title"])
+            line = f"[{title}]({h['link']})" if h.get("link") else title
+            st.markdown(f"{line}  \n<span class='sa-sub'>{_esc(meta)}</span>",
+                        unsafe_allow_html=True)
+        st.caption("כותרות וקישורים בלבד, ממקורות חינמיים (Yahoo / Google News).")
 
 
 def render_watchlist_home():
@@ -1286,6 +1432,7 @@ def render_watchlist_home():
                     if q.change_pct is not None:
                         color = "green" if q.change_pct >= 0 else "red"
                         label += f" · :{color}[\u2066{q.change_pct:+.2f}%\u2069]"
+                label += score_tag(score_for(sym))
             except Exception:
                 pass
             st.button(label, key=f"wl_view_{sym}", on_click=_goto, args=(sym,),
@@ -1334,7 +1481,10 @@ if home:
 # Resolve the query to candidate tickers. If there's more than one match, let
 # the user pick the right one (e.g. the Tel-Aviv AVIV.TA, not a US ETF).
 symbol = None
-if query:
+if query and query == st.session_state.get("exact_symbol"):
+    symbol = query          # opened from a portfolio / watchlist row
+elif query:
+    st.session_state.pop("exact_symbol", None)   # a typed search asks as before
     try:
         matches = load_matches(query)
     except Exception:
@@ -1447,6 +1597,9 @@ if symbol:
             st.radio("סוג גרף", options=["קו", "נרות"], horizontal=True, key="chart_type")
             st.toggle("הצג כשינוי באחוזים מתחילת הטווח", key="as_percent")
 
+        # ======================= Buy score (items 12-13) =======================
+        render_score_section(symbol, quote.name or symbol, verdict, analyst)
+
         # ======================= Bottom line (verdict) =======================
         if verdict is None or not verdict.found:
             st.info("אין פסיקה זמינה למניה הזו.")
@@ -1534,6 +1687,9 @@ if symbol:
                 f"פירוט נוסף ב-[Yahoo Finance](https://finance.yahoo.com/quote/{symbol}/analysis). "
                 "ציונים של אתרים כמו TipRanks בדרך כלל בתשלום."
             )
+
+        # ======================= News (item 18) =======================
+        render_news_section(symbol, quote.name or symbol)
 
         # ======================= Key numbers =======================
         st.markdown("#### נתונים עיקריים")
