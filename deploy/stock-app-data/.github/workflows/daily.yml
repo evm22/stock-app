@@ -44,7 +44,9 @@ concurrency:
 
 jobs:
   run:
-    runs-on: ubuntu-latest
+    # Pinned: ubuntu-latest moved to Ubuntu 26, which Playwright's Chromium
+    # (used by keep_awake.py) doesn't support yet.
+    runs-on: ubuntu-24.04
     timeout-minutes: 150
     env:
       TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
@@ -52,16 +54,16 @@ jobs:
       GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
     steps:
       - name: Check out the data repo
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Check out the app code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           repository: evm22/stock-app
           path: app
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: "3.12"
           cache: pip
@@ -72,7 +74,10 @@ jobs:
       - name: Install dependencies
         run: |
           pip install -r app/requirements.txt -r app/requirements-job.txt
-          python -m playwright install --with-deps chromium
+
+      - name: Install the browser for keep-awake
+        continue-on-error: true   # only "keep the app awake" needs it
+        run: python -m playwright install --with-deps chromium
 
       - name: Run the daily job
         env:
