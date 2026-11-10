@@ -53,7 +53,7 @@ Separate from the app, a two-step screener scores the whole universe
 (~611 tickers: S&P 500 + Israeli stocks + themes, see `universe.py`):
 
 ```bash
-python scan.py             # scores every ticker -> screen_results.json (~30 min)
+python scan.py             # scores every ticker -> local_data/data/screen_results.json (~35 min)
 python scan.py --resume    # continue an interrupted scan from its checkpoint
 python rank.py             # top 25 opportunities, 1-year horizon
 python rank.py --horizon 5y --theme ai --max-beta 1.5 --top 10
@@ -77,6 +77,13 @@ technicals, holders). Missing values show "—"; the Debug panel appears only
 with `?debug=1`. Colors live in `.streamlit/config.toml`, the layout CSS at
 the top of `app.py`. Some engine texts (signal names, tooltips) are still
 English.
+
+To work on the look without internet, `dev/demo_app.py` runs the real
+`app.py` on made-up sample data (AAPL, NVDA, TEVA.TA):
+
+```bash
+streamlit run dev/demo_app.py
+```
 
 ## Run it locally
 
@@ -161,15 +168,3 @@ The GitHub Actions workflow that runs it every morning is kept as a template in
 `deploy/stock-app-data/`. It is meant for the private data repo and is **not**
 active in this public repo (GitHub only runs workflows under `.github/`).
 `keep_awake.py` (used by that workflow) visits the live app so it isn't asleep.
-
-## Working on the look offline
-
-`dev/demo_app.py` runs the real `app.py` with made-up sample data (AAPL, NVDA,
-TEVA.TA), so you can see and screenshot the UI without internet access:
-
-```bash
-streamlit run dev/demo_app.py
-```
-
-The colors live in `.streamlit/config.toml` (committed); the Hebrew
-right-to-left layout and the small cards are CSS at the top of `app.py`.

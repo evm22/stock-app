@@ -2,7 +2,8 @@
 scan.py -- Stage 2a: standalone opportunity screener.
 
 Scores every ticker in the universe using the SAME engine as the app
-(compute_verdict + get_analyst_consensus), then writes screen_results.json.
+(compute_verdict + get_analyst_consensus), then writes
+local_data/data/screen_results.json (the same file daily_job.py uses).
 
 Usage:
     python scan.py             # full universe
@@ -22,6 +23,11 @@ from datetime import datetime, timezone
 
 import engine
 from universe import get_universe
+
+# ONE place for scan results, shared by scan.py, rank.py and daily_job.py
+# (daily_job writes <data dir>/data/screen_results.json; locally that is this).
+DEFAULT_RESULTS = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                               "local_data", "data", "screen_results.json")
 
 # ---------------------------------------------------------------------------
 # Config
@@ -223,6 +229,7 @@ def _write_results(path: str, as_of: str, total: int, rows: list,
         "complete":      complete,
         "rows":          rows,
     }
+    os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
     tmp = path + ".tmp"
     with open(tmp, "w", encoding="utf-8") as fh:
         json.dump(result, fh, indent=2, ensure_ascii=False)
@@ -242,7 +249,7 @@ def _load_checkpoint(path: str) -> list:
     return data.get("rows", [])
 
 
-def run_scan(universe: list, out_path: str = "screen_results.json",
+def run_scan(universe: list, out_path: str = DEFAULT_RESULTS,
              resume: bool = False) -> dict:
     total      = len(universe)
     rows       = []
@@ -330,8 +337,9 @@ def main():
         help="Only scan the first N tickers (default: full universe)",
     )
     parser.add_argument(
-        "--out", default="screen_results.json",
-        help="Output JSON file (default: screen_results.json)",
+        "--out", default=DEFAULT_RESULTS,
+        help="Output JSON file (default: local_data/data/screen_results.json, "
+             "the same file the daily job uses)",
     )
     parser.add_argument(
         "--resume", action="store_true",
