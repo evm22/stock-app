@@ -47,6 +47,43 @@ Actively built in small steps. Current features:
 - A **"?" tooltip** on every metric, and a Debug panel showing where each value
   came from.
 
+## Opportunity screener (offline batch)
+
+Separate from the app, a two-step screener scores the whole universe
+(~611 tickers: S&P 500 + Israeli stocks + themes, see `universe.py`):
+
+```bash
+python scan.py             # scores every ticker -> screen_results.json (~30 min)
+python scan.py --resume    # continue an interrupted scan from its checkpoint
+python rank.py             # top 25 opportunities, 1-year horizon
+python rank.py --horizon 5y --theme ai --max-beta 1.5 --top 10
+python rank.py --region IL --agree-only
+```
+
+`rank.py` blends **60% our verdict score + 40% analyst implied upside**
+(clamped to -20%..+50%; no coverage = neutral +10%), minus a small risk penalty for high beta and heavy
+debt. The formula and its knobs are at the top of `rank.py`.
+
+### Daily job + Telegram summary
+
+`daily.py` runs the scan, ranks it, saves a dated snapshot to `history/`
+(kept for later evaluation of how the picks performed), compares with the
+previous day, and sends a Hebrew summary to Telegram via `notify.py`.
+
+1. Add the bot credentials to `.streamlit/secrets.toml` (git-ignored):
+   `TELEGRAM_TOKEN = "..."` and `TELEGRAM_CHAT_ID = "..."`
+2. Test: `python notify.py "hello"` and `python daily.py --no-scan --dry-run`
+3. Schedule it (macOS launchd): the job starts at 08:00 and the message
+   is sent at 09:00:
+
+```bash
+cp com.evyat.stockapp.daily.plist ~/Library/LaunchAgents/
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.evyat.stockapp.daily.plist
+```
+
+Logs go to `logs/daily.log`. The Mac must be on (if asleep at 08:00, the
+job runs when it wakes, and sends as soon as it is done).
+
 ## Run it locally
 
 ```bash
@@ -75,6 +112,9 @@ The data logic lives in `engine.py` (pure Python, no Streamlit); the UI in
 ```bash
 venv\Scripts\python test_engine.py   # engine vs live Yahoo (needs internet)
 venv\Scripts\python test_app.py      # chart builder, no network (fast)
+venv\Scripts\python test_scan.py     # screener scan logic, no network
+venv\Scripts\python test_rank.py     # screener ranking + resume, no network
+venv\Scripts\python test_daily.py    # daily job + Telegram (mocked), no network
 ```
 
 Each prints a plain-text `PASS`/`FAIL` per check and exits `0` if everything

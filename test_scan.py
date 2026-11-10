@@ -104,7 +104,7 @@ class TestRowSchema(unittest.TestCase):
 
     EXPECTED_KEYS = {
         "symbol", "regions", "themes",
-        "score_6m", "score_1y", "score_5y",
+        "score_6m", "score_1y", "score_5y", "score_num",
         "current_price",
         "analyst_mean_target", "analyst_implied_upside_pct",
         "risk", "data_status", "missing_fields", "as_of",

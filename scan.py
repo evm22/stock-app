@@ -7,10 +7,14 @@ Scores every ticker in the universe using the SAME engine as the app
 Usage:
     python scan.py             # full universe
     python scan.py --limit 20  # first N tickers (smoke-test)
+    python scan.py --resume    # continue an interrupted run from its checkpoint
+
+Then rank the results with rank.py (Stage 2b).
 """
 
 import argparse
 import json
+import os
 import sys
 import time
 from collections import Counter
@@ -24,6 +28,7 @@ from universe import get_universe
 # ---------------------------------------------------------------------------
 
 SLEEP_BETWEEN = 1.0    # seconds between tickers (Yahoo throttle)
+CHECKPOINT_EVERY = 25  # write partial results every N tickers (crash-safe)
 RETRY_DELAYS  = [5, 15]  # seconds to wait before retry 1, retry 2
 
 # Fields that a fully-populated ("ok") row should have non-null.
@@ -68,6 +73,9 @@ def _build_row(entry: dict, as_of: str) -> dict:
     verdict = engine.compute_verdict(symbol)
 
     score_6m = score_1y = score_5y = None
+    # Numeric 0..100 scores behind each label -- rank.py sorts on these
+    # (labels alone are too coarse: dozens of stocks share "Buy").
+    num_6m = num_1y = num_5y = None
     if verdict.found and verdict.horizons:
         hv6  = verdict.horizons.get("6M")
         hv1  = verdict.horizons.get("1Y")
@@ -75,6 +83,9 @@ def _build_row(entry: dict, as_of: str) -> dict:
         score_6m = hv6.label if (hv6 and hv6.enough_data) else None
         score_1y = hv1.label if (hv1 and hv1.enough_data) else None
         score_5y = hv5.label if (hv5 and hv5.enough_data) else None
+        num_6m = hv6.score if (score_6m and engine._is_number(hv6.score)) else None
+        num_1y = hv1.score if (score_1y and engine._is_number(hv1.score)) else None
+        num_5y = hv5.score if (score_5y and engine._is_number(hv5.score)) else None
 
     # --- analyst consensus ---
     analyst = engine.get_analyst_consensus(symbol)
@@ -137,6 +148,7 @@ def _build_row(entry: dict, as_of: str) -> dict:
         "score_6m": score_6m,
         "score_1y": score_1y,
         "score_5y": score_5y,
+        "score_num": {"6m": num_6m, "1y": num_1y, "5y": num_5y},
         "current_price":              current_price,
         "analyst_mean_target":        analyst_mean_target,
         "analyst_implied_upside_pct": analyst_implied_upside,
@@ -178,6 +190,7 @@ def _score_one(entry: dict, as_of: str) -> dict:
             "regions":  entry.get("regions", []),
             "themes":   entry.get("themes", []),
             "score_6m": None, "score_1y": None, "score_5y": None,
+            "score_num": {"6m": None, "1y": None, "5y": None},
             "current_price": None,
             "analyst_mean_target": None,
             "analyst_implied_upside_pct": None,
@@ -192,17 +205,58 @@ def _score_one(entry: dict, as_of: str) -> dict:
 # Main scan loop
 # ---------------------------------------------------------------------------
 
-def run_scan(universe: list, out_path: str = "screen_results.json") -> None:
+def _write_results(path: str, as_of: str, total: int, rows: list,
+                   complete: bool) -> None:
+    """Write the results file atomically (tmp file + rename)."""
+    result = {
+        "generated_at":  as_of,
+        "universe_size": total,
+        "complete":      complete,
+        "rows":          rows,
+    }
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as fh:
+        json.dump(result, fh, indent=2, ensure_ascii=False)
+    os.replace(tmp, path)
+
+
+def _load_checkpoint(path: str) -> list:
+    """Rows from an unfinished earlier run (complete=False), else []."""
+    try:
+        with open(path, encoding="utf-8") as fh:
+            data = json.load(fh)
+    except (OSError, ValueError):
+        return []
+    if data.get("complete", True):
+        return []
+    return data.get("rows", [])
+
+
+def run_scan(universe: list, out_path: str = "screen_results.json",
+             resume: bool = False) -> None:
     total      = len(universe)
     rows       = []
     failed_syms = []
     t_start    = time.monotonic()
 
     as_of = datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+    # --resume: keep rows already scored by an interrupted run, skip them.
+    done = set()
+    if resume:
+        rows = _load_checkpoint(out_path)
+        done = {r["symbol"] for r in rows}
+        failed_syms = [r["symbol"] for r in rows if r["data_status"] == "failed"]
+        if rows:
+            as_of = rows[0].get("as_of", as_of)
+            print(f"Resuming: {len(rows)} tickers already scored.")
+
     print(f"Starting scan of {total} tickers.  Output -> {out_path}")
     print("-" * 60)
 
     for idx, entry in enumerate(universe, start=1):
+        if entry["symbol"] in done:
+            continue
         symbol = entry["symbol"]
         row = _score_one(entry, as_of)
         rows.append(row)
@@ -213,19 +267,18 @@ def run_scan(universe: list, out_path: str = "screen_results.json") -> None:
         print(f"[{idx:4d}/{total}] scored {symbol:12s} ... {status}  "
               f"({elapsed:.0f}s)")
         sys.stdout.flush()
+        if len(rows) % CHECKPOINT_EVERY == 0:
+            try:
+                _write_results(out_path, as_of, total, rows, complete=False)
+            except Exception as exc:
+                print(f"  (checkpoint write failed: {exc})")
         if idx < total:
             time.sleep(SLEEP_BETWEEN)
 
     # Write output.
     elapsed_total = time.monotonic() - t_start
-    result = {
-        "generated_at":  as_of,
-        "universe_size": total,
-        "rows":          rows,
-    }
     try:
-        with open(out_path, "w", encoding="utf-8") as fh:
-            json.dump(result, fh, indent=2, ensure_ascii=False)
+        _write_results(out_path, as_of, total, rows, complete=True)
         print(f"\nWrote {out_path}")
     except Exception as exc:
         print(f"\nERROR writing {out_path}: {exc}")
@@ -267,6 +320,10 @@ def main():
         "--out", default="screen_results.json",
         help="Output JSON file (default: screen_results.json)",
     )
+    parser.add_argument(
+        "--resume", action="store_true",
+        help="Continue an interrupted scan from its checkpoint in --out",
+    )
     args = parser.parse_args()
 
     universe = get_universe()
@@ -274,9 +331,10 @@ def main():
         universe = universe[:args.limit]
 
     try:
-        run_scan(universe, out_path=args.out)
+        run_scan(universe, out_path=args.out, resume=args.resume)
     except KeyboardInterrupt:
-        print("\nInterrupted by user.  Partial results NOT saved.")
+        print("\nInterrupted.  Re-run with --resume to continue from the "
+              "last checkpoint.")
         sys.exit(1)
 
 

@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Starts the stock screener every day at 08:00 (scan ~40 min) and sends the
+  Telegram summary at 09:00.  If the Mac is asleep at 08:00, launchd runs it as soon as it wakes.
+  Install:   cp com.evyat.stockapp.daily.plist ~/Library/LaunchAgents/
+             launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.evyat.stockapp.daily.plist
+  Uninstall: launchctl bootout gui/$(id -u)/com.evyat.stockapp.daily
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.evyat.stockapp.daily</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Users/Evyat/Claude/stock-app/run_daily.sh</string>
+    <string>--send-at</string>
+    <string>09:00</string>
+  </array>
+  <key>StartCalendarInterval</key>
+  <dict>
+    <key>Hour</key><integer>8</integer>
+    <key>Minute</key><integer>0</integer>
+  </dict>
+  <key>StandardErrorPath</key>
+  <string>/Users/Evyat/Claude/stock-app/logs/launchd.err</string>
+</dict>
+</plist>

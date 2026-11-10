@@ -36,3 +36,10 @@ Thumbs.db
 
 # --- Screener output (large data file; not committed) ---
 screen_results.json
+
+# Scan logs / checkpoint temp files
+scan_full.log
+*.json.tmp
+top*.json
+history/
+logs/
