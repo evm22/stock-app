@@ -1420,10 +1420,12 @@ def render_portfolio_home():
         render_manual_box(data)
         return
     rows, names = portfolio_rows(holdings)
+    manual_scores = {}
     for m in manual:
         r = portfolio.manual_row(m)
         rows.append(r)
         names[r["symbol"]] = m["name"]
+        manual_scores[r["symbol"]] = score_for_manual(m)
     st.markdown(portfolio_card_html(portfolio.summarize(rows)), unsafe_allow_html=True)
     if holdings:
         render_week_events(holdings, names)
@@ -1431,7 +1433,7 @@ def render_portfolio_home():
         for r in rows:
             sym = r["symbol"]
             if r.get("manual"):
-                label = (f"**{md_safe(r['name'])}**\nשווי ידני · "
+                label = (f"**{md_safe(r['name'])}**{score_tag(manual_scores.get(sym))}\nשווי ידני · "
                          f"\u2066{md_safe(portfolio.money(r['value'], 'ILS', 0))}\u2069")
                 if r["pnl_pct"] is not None:
                     color = "green" if r["pnl_pct"] >= 0 else "red"
@@ -1449,7 +1451,8 @@ def render_portfolio_home():
             st.button(label, key=f"pf_view_{sym}", on_click=_goto, args=(sym,),
                       width="stretch")
     render_manual_box(data)
-    render_portfolio_overview(rows, names, data)
+    render_portfolio_overview(rows, names, data,
+                              {k: v["score"] for k, v in manual_scores.items() if v})
 
 
 # --- Holdings with a value typed by hand (Israeli funds etc.) -------------
@@ -1479,10 +1482,24 @@ def render_manual_box(data):
                                         step=100.0, key=f"manual_value_{pick}")
                 cost = c2.number_input("עלות (₪)", min_value=0.0, value=float(m["cost"]),
                                        step=100.0, key=f"manual_cost_{pick}")
+                current = ",".join(portfolio.tracks_of(m))
+                options = [""] + list(portfolio.TRACK_OPTIONS)
+                if current and current not in options:
+                    options.append(current)
+                tracks = st.selectbox(
+                    "עוקבת אחרי מדד (בשביל הציון)", options, index=options.index(current),
+                    format_func=lambda o: portfolio.TRACK_OPTIONS.get(o, o) if o else "בלי ציון",
+                    key=f"manual_tracks_{pick}")
                 saved = st.form_submit_button("שמור עדכון", type="primary", width="stretch")
+            ms = score_for_manual(m)
+            if ms:
+                st.caption(f"הציון \u2066{ms['score']:+d}\u2069 הוא הציון של המדד שהקרן עוקבת אחריו "
+                           + ("(ממוצע של הבנקים במדד). " if ms["count"] > 1 else ". ")
+                           + "למדד אין דוחות כספיים, אז הציון מבוסס על המגמה והמומנטום של המחיר.")
             if saved:
                 try:
-                    update_portfolio(lambda d: portfolio.update_manual(d, pick, value, cost),
+                    update_portfolio(lambda d: portfolio.update_manual(d, pick, value, cost,
+                                                                        tracks=tracks),
                                      "Update a hand-valued holding")
                     st.session_state.pop("manual_pick", None)
                     st.rerun()
@@ -1577,9 +1594,10 @@ def _run_ai_overview(sig, facts_payload):
         st.session_state["_ai_overview_failed"] = True
 
 
-def render_portfolio_overview(rows, names, data=None):
+def render_portfolio_overview(rows, names, data=None, manual_scores=None):
     """Facts computed in code + (on request) AI strengths / weaknesses / ideas."""
     scores = {r["symbol"]: score_for(r["symbol"])["score"] for r in rows if not r.get("manual")}
+    scores.update(manual_scores or {})
     facts = ai_insights.portfolio_facts(rows, scores, names)
     if not facts["weights"]:
         return
@@ -1835,6 +1853,18 @@ def score_for(symbol, verdict=None, analyst=None):
         analyst = None
     ai = ai_news_rating(symbol)
     return buy_score.from_engine_objects(verdict, analyst, ai["score"] if ai else None)
+
+
+def score_for_manual(m):
+    """A fund's score = the score of the index it follows (the average when it
+    follows several symbols, e.g. the 5 banks). None when it follows nothing."""
+    syms = portfolio.tracks_of(m)
+    vals = [v for v in (score_for(s)["score"] for s in syms) if v is not None]
+    if not vals:
+        return None
+    n = int(round(sum(vals) / len(vals)))
+    cls = "up" if n >= buy_score.LEAN else ("down" if n <= -buy_score.LEAN else "hold")
+    return {"score": n, "cls": cls, "of": syms, "count": len(vals)}
 
 
 def score_tag(score):

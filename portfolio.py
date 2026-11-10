@@ -236,7 +236,55 @@ def _clean_manual(m):
         raise PortfolioError("בקובץ יש נכס ידני חסר או לא תקין.") from None
     if not out["name"]:
         raise PortfolioError("חסר שם לנכס.")
+    if "tracks" in m:                       # absent = guess from the name
+        out["tracks"] = _clean_tracks(m["tracks"])
     return out
+
+
+# What a fund follows, for its score: Yahoo symbols (several = their average).
+# The banks index has almost no history on Yahoo, so it's its 5 banks.
+TRACK_OPTIONS = {
+    "TA35.TA": "ת״א 35",
+    "^TA125.TA": "ת״א 125",
+    "TA90.TA": "ת״א 90",
+    "LUMI.TA,POLI.TA,DSCT.TA,MZTF.TA,FIBI.TA": "ת״א בנקים (5 הבנקים)",
+    "^GSPC": "S&P 500",
+    "^NDX": "נאסד״ק 100",
+    "^N225": "ניקיי 225 (יפן)",
+    "INDA": "MSCI India (הודו)",
+}
+_TRACK_GUESS = (   # (words in the fund's name, symbols); first match wins
+    (("בנק",), "LUMI.TA,POLI.TA,DSCT.TA,MZTF.TA,FIBI.TA"),
+    (("NIKKEI", "ניקיי"), "^N225"),
+    (("INDIA", "הודו"), "INDA"),
+    (("S&P", "500"), "^GSPC"),
+    (("NASDAQ", "נאסד"), "^NDX"),
+    (("125",), "^TA125.TA"),
+    (("90",), "TA90.TA"),
+    (("35",), "TA35.TA"),
+)
+
+
+def _clean_tracks(value):
+    if not value:
+        return ""
+    syms = [x.strip().upper() for x in str(value).split(",") if x.strip()]
+    return ",".join(syms)
+
+
+def guess_tracks(name):
+    """A symbol string for a fund's index from its name, or '' if unsure."""
+    up = str(name or "").upper()
+    for words, syms in _TRACK_GUESS:
+        if any(w.upper() in up for w in words):
+            return syms
+    return ""
+
+
+def tracks_of(m):
+    """The symbols a hand-valued holding follows ([] = none)."""
+    t = m["tracks"] if "tracks" in m else guess_tracks(m.get("name"))
+    return [x for x in (t or "").split(",") if x]
 
 
 def add_manual(data, name, value, cost, today=None):
@@ -250,16 +298,22 @@ def add_manual(data, name, value, cost, today=None):
     return new
 
 
-def update_manual(data, manual_id, value, cost=None, today=None):
-    """Return NEW data with that holding's value (and maybe cost) updated."""
+_KEEP = object()
+
+
+def update_manual(data, manual_id, value, cost=None, today=None, tracks=_KEEP):
+    """Return NEW data with that holding's value (and maybe cost / tracked
+    index: a symbol string, '' for none) updated."""
     new = _with(data, list(data.get("transactions", [])))
     out, found = [], False
     for m in data.get("manual", []):
         if m["id"] == manual_id:
             found = True
-            m = _clean_manual({**m, "value": value,
-                               "cost": m["cost"] if cost is None else cost,
-                               "updated": today or date.today()})
+            m = {**m, "value": value, "cost": m["cost"] if cost is None else cost,
+                 "updated": today or date.today()}
+            if tracks is not _KEEP:
+                m["tracks"] = tracks
+            m = _clean_manual(m)
         out.append(m)
     if not found:
         raise PortfolioError("הנכס לא נמצא.")

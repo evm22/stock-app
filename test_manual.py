@@ -59,6 +59,29 @@ class TestManual(unittest.TestCase):
         self.assertEqual(P.merge_trades(new, a)[1], 0)
 
 
+class TestTracks(unittest.TestCase):
+    def test_guess_from_name(self):
+        self.assertEqual(P.guess_tracks("הראל מחקה (A4) ת״א 35"), "TA35.TA")
+        self.assertEqual(P.guess_tracks("MTF מחקה (D4) ת״א-90"), "TA90.TA")
+        self.assertEqual(P.guess_tracks("הראל סל NIKKEI225"), "^N225")
+        self.assertEqual(P.guess_tracks("הראל MSCI INDIA"), "INDA")
+        self.assertEqual(P.guess_tracks("ATF מחקה (40) אינדקס בנקי").count(","), 4)
+        self.assertEqual(P.guess_tracks("אי.בי.אי. סל (A4) אינדקס"), "")
+
+    def test_choice_is_kept_and_none_means_none(self):
+        d = P.add_manual(P.empty(), "הראל מחקה ת״א 35", 100, 90)
+        m = d["manual"][0]
+        self.assertEqual(P.tracks_of(m), ["TA35.TA"])              # guessed
+        d2 = P.update_manual(d, m["id"], 110, tracks="^gspc")
+        self.assertEqual(P.tracks_of(d2["manual"][0]), ["^GSPC"])
+        d3 = P.update_manual(d2, m["id"], 120)                      # kept
+        self.assertEqual(P.tracks_of(d3["manual"][0]), ["^GSPC"])
+        d4 = P.update_manual(d3, m["id"], 120, tracks="")           # no score
+        self.assertEqual(P.tracks_of(d4["manual"][0]), [])
+        back, _ = P.parse_backup(P.make_backup(d4, []))
+        self.assertEqual(P.tracks_of(back["manual"][0]), [])
+
+
 class TestInApp(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -88,6 +111,12 @@ class TestInApp(unittest.TestCase):
         [b for b in at.button if b.label == "שמור עדכון"][0].click().run()
         self.assertFalse(at.exception, at.exception)
         self.assertIn("₪1,500", "\n".join(m.value for m in at.markdown))
+        at.selectbox(key=f"manual_tracks_{pick}").set_value("^GSPC")
+        [b for b in at.button if b.label == "שמור עדכון"][0].click().run()
+        self.assertFalse(at.exception, at.exception)
+        import json
+        with open(os.path.join(self.tmp.name, "data", "portfolio.json"), encoding="utf-8") as fh:
+            self.assertEqual(json.load(fh)["manual"][0]["tracks"], "^GSPC")
 
 
 if __name__ == "__main__":

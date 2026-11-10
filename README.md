@@ -84,7 +84,7 @@ until the private data repo is connected they stay **in the browser on that
 device** (never in a server folder: on Streamlit Cloud that folder is shared
 by everyone with the link and wiped on every redeploy); once `DATA_REPO` +
 token are set they go to `data/portfolio.json` in the private repo through
-`data_store.py`. Holdings with no price in the free data (Israeli mutual / tracker funds) can be added by hand under **✏️ קרנות ונכסים בלי מחיר אוטומטי**: name, value now and cost in ₪ (`data["manual"]`); they count in the total and the weights, not in scores, events or the index comparison. A portfolio saved by the older qty-only version is turned
+`data_store.py`. Holdings with no price in the free data (Israeli mutual / tracker funds) can be added by hand under **✏️ קרנות ונכסים בלי מחיר אוטומטי**: name, value now and cost in ₪ (`data["manual"]`); they count in the total and the weights, not in events or the index comparison. A fund's score is the score of the index it follows (`portfolio.tracks_of`: guessed from the name, e.g. ת״א 35 -> `TA35.TA`, or picked in the edit form; the banks index is the average of its 5 banks because Yahoo has almost no history for `TA-BANKS.TA`). For an index the engine only has price trend / momentum signals. A portfolio saved by the older qty-only version is turned
 into "opening" trades automatically, once. The watchlist is saved in the
 browser too (in the repo: `data/watchlist.json`). When the repo is connected,
 each device moves what its browser kept into the repo once
