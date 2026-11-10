@@ -9,8 +9,9 @@ None and the app shows exactly what it does today — no error, no empty box.
 Design notes:
 - No Streamlit here, so the data layer stays importable/testable on its own. The
   API key is always passed in as a string argument (app.py reads st.secrets).
-- google-generativeai is imported LAZILY, inside explain_verdict, and only after
-  we've confirmed there's a key. So importing this module never fails even if the
+- google-genai (the current Gemini SDK; it replaced google-generativeai, whose
+  support ended) is imported LAZILY, inside _generate, and only after we've
+  confirmed there's a key. So importing this module never fails even if the
   package isn't installed/configured, and the no-key path needs no network at all.
 """
 import json
@@ -26,8 +27,8 @@ _REQUEST_TIMEOUT_S = 45
 
 # Output token budget per depth. IMPORTANT: the current free Flash model
 # (gemini-2.5-flash) is a *thinking* model — its internal reasoning tokens count
-# against max_output_tokens, and this SDK (google-generativeai 0.8.x) can't set a
-# thinking budget (thinking_config is rejected). With a small ceiling the budget
+# against max_output_tokens. (The old google-generativeai SDK couldn't limit
+# that; we keep the generous ceilings anyway, they are harmless.) With a small ceiling the budget
 # is spent thinking and the visible text truncates mid-sentence (the original
 # bug). The reasoning grows with input size, so the ceiling must comfortably
 # cover thinking + the actual answer; these generous caps let the model finish
@@ -75,25 +76,68 @@ def _build_prompt(structured_data, depth) -> str:
             "Now write the explanation.")
 
 
-def _select_flash_model(genai):
+_MODEL_CACHE = {}
+
+
+def _select_flash_model(client):
     """Ask the API which models this key can use; pick a current Flash model that
-    supports generateContent. Returns a model name, or None if none/availble."""
+    supports generateContent. Returns a model name, or None."""
+    if "name" in _MODEL_CACHE:
+        return _MODEL_CACHE["name"]
+    chosen = None
     try:
         flash = []
-        for model in genai.list_models():
-            methods = getattr(model, "supported_generation_methods", []) or []
-            name = getattr(model, "name", "") or ""
-            if "generateContent" in methods and "flash" in name.lower():
+        for model in client.models.list():
+            actions = getattr(model, "supported_actions", None) or []
+            name = (getattr(model, "name", "") or "").replace("models/", "")
+            if "generateContent" in actions and "flash" in name.lower() \
+                    and "image" not in name.lower() and "tts" not in name.lower() \
+                    and "live" not in name.lower():
                 flash.append(name)
         if flash:
-            # Prefer stable names: deprioritise preview/exp, then shorter names.
-            flash.sort(key=lambda n: ("preview" in n or "exp" in n, len(n)))
+            # Prefer stable names: deprioritise preview/exp/lite, then shorter names.
+            flash.sort(key=lambda n: ("preview" in n or "exp" in n, "lite" in n, len(n)))
             chosen = flash[0]
-            logger.info("Gemini: selected model %s from list_models()", chosen)
-            return chosen
+            logger.info("Gemini: selected model %s from models.list()", chosen)
     except Exception as error:
-        logger.warning("Gemini: list_models() failed (%s); using fallbacks", error)
-    return None
+        logger.warning("Gemini: models.list() failed (%s); using fallbacks", error)
+    _MODEL_CACHE["name"] = chosen
+    return chosen
+
+
+def _generate(prompt, api_key, temperature=0.2, max_tokens=4096, accept=None):
+    """One answer from Gemini, trying the available Flash models in order.
+    `accept(text)` turns the reply into the result (None = try the next model).
+    Returns the result, or None on no key / any failure. Never raises."""
+    if not api_key:
+        return None
+    accept = accept or (lambda t: t.strip() or None)
+    try:
+        from google import genai
+        from google.genai import types
+
+        client = genai.Client(api_key=api_key,
+                              http_options=types.HttpOptions(timeout=_REQUEST_TIMEOUT_S * 1000))
+        candidates = []
+        selected = _select_flash_model(client)
+        if selected:
+            candidates.append(selected)
+        candidates += [n for n in _FALLBACK_MODELS if n not in candidates]
+        config = types.GenerateContentConfig(temperature=temperature,
+                                             max_output_tokens=max_tokens)
+        for name in candidates:
+            try:
+                response = client.models.generate_content(model=name, contents=prompt,
+                                                          config=config)
+                result = accept(getattr(response, "text", "") or "")
+                if result:
+                    return result
+            except Exception as error:
+                logger.warning("Gemini: model %s failed (%s)", name, error)
+        return None
+    except Exception as error:
+        logger.warning("Gemini: call failed (%s)", error)
+        return None
 
 
 def explain_verdict(structured_data, api_key, depth="quick"):
@@ -104,50 +148,20 @@ def explain_verdict(structured_data, api_key, depth="quick"):
 
     Returns None (no exception, no network) when:
       - api_key is falsy (None/empty),
-      - google-generativeai isn't importable,
+      - google-genai isn't importable,
       - listing + all fallback models fail,
       - the call errors or times out,
       - Gemini returns empty/whitespace.
     """
     if not api_key:
         return None  # optional feature off — skip silently, no import, no network
-
     try:
-        import google.generativeai as genai
-
-        genai.configure(api_key=api_key)
         prompt = _build_prompt(structured_data, depth)
-        max_tokens = _TOKENS_BY_DEPTH.get(depth, _TOKENS_BY_DEPTH["quick"])
-
-        # Try the model the API recommends first, then the fallbacks in order.
-        candidates = []
-        selected = _select_flash_model(genai)
-        if selected:
-            candidates.append(selected)
-        for name in _FALLBACK_MODELS:
-            if name not in candidates:
-                candidates.append(name)
-
-        generation_config = {"temperature": 0.2, "max_output_tokens": max_tokens}
-        for name in candidates:
-            try:
-                model = genai.GenerativeModel(
-                    name, generation_config=generation_config)
-                response = model.generate_content(
-                    prompt, request_options={"timeout": _REQUEST_TIMEOUT_S})
-                text = (getattr(response, "text", "") or "").strip()
-                if text:
-                    logger.info("Gemini: %s explanation generated with %s",
-                                depth, name)
-                    return text
-            except Exception as error:
-                logger.warning("Gemini: model %s failed (%s)", name, error)
-                continue
-        return None
     except Exception as error:
-        # ANY failure -> log quietly and behave as if the feature is off.
         logger.warning("Gemini: explain_verdict failed (%s)", error)
         return None
+    return _generate(prompt, api_key, temperature=0.2,
+                     max_tokens=_TOKENS_BY_DEPTH.get(depth, _TOKENS_BY_DEPTH["quick"]))
 
 
 
@@ -192,31 +206,8 @@ def rate_news(symbol, name, headlines, api_key):
     headlines, or any failure). One small call; never raises."""
     if not api_key or not headlines:
         return None
-    try:
-        import google.generativeai as genai
-        genai.configure(api_key=api_key)
-        candidates = []
-        selected = _select_flash_model(genai)
-        if selected:
-            candidates.append(selected)
-        candidates += [n for n in _FALLBACK_MODELS if n not in candidates]
-        prompt = _news_prompt(symbol, name, headlines)
-        for model_name in candidates:
-            try:
-                model = genai.GenerativeModel(
-                    model_name, generation_config={"temperature": 0.1,
-                                                   "max_output_tokens": 2048})
-                response = model.generate_content(
-                    prompt, request_options={"timeout": _REQUEST_TIMEOUT_S})
-                parsed = parse_news_rating(getattr(response, "text", "") or "")
-                if parsed:
-                    return parsed
-            except Exception as error:
-                logger.warning("Gemini: news rating with %s failed (%s)", model_name, error)
-        return None
-    except Exception as error:
-        logger.warning("Gemini: rate_news failed (%s)", error)
-        return None
+    return _generate(_news_prompt(symbol, name, headlines), api_key,
+                     temperature=0.1, max_tokens=2048, accept=parse_news_rating)
 
 
 
@@ -256,32 +247,8 @@ def parse_json_object(text):
 
 def _ask_json(prompt, api_key, max_tokens=4096):
     """Ask once (trying the available Flash models) -> dict or None. Never raises."""
-    if not api_key:
-        return None
-    try:
-        import google.generativeai as genai
-        genai.configure(api_key=api_key)
-        candidates = []
-        selected = _select_flash_model(genai)
-        if selected:
-            candidates.append(selected)
-        candidates += [n for n in _FALLBACK_MODELS if n not in candidates]
-        for model_name in candidates:
-            try:
-                model = genai.GenerativeModel(
-                    model_name, generation_config={"temperature": 0.2,
-                                                   "max_output_tokens": max_tokens})
-                response = model.generate_content(
-                    prompt, request_options={"timeout": _REQUEST_TIMEOUT_S})
-                obj = parse_json_object(getattr(response, "text", "") or "")
-                if obj:
-                    return obj
-            except Exception as error:
-                logger.warning("Gemini: %s failed (%s)", model_name, error)
-        return None
-    except Exception as error:
-        logger.warning("Gemini: _ask_json failed (%s)", error)
-        return None
+    return _generate(prompt, api_key, temperature=0.2, max_tokens=max_tokens,
+                     accept=parse_json_object)
 
 
 # --- Item 14: portfolio overview (words only; numbers come from the code) ---

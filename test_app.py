@@ -353,7 +353,7 @@ def expect_famous_investors_offline():
 
 def expect_gemini_optional_offline():
     """The Gemini layer is optional and offline-safe: with no key it returns None
-    immediately (no google-generativeai import, no network) for BOTH depths, and
+    immediately (no Gemini SDK import, no network) for BOTH depths, and
     weird/garbage structured_data never raises. Runs with NO key and NO network."""
     good = {"symbol": "AAPL", "verdict_by_horizon": {"1Y": "Buy (60/100)"}}
     for depth in ("quick", "deep"):
