@@ -70,11 +70,16 @@ The daily run that does all of this automatically is described under
 ## Look & feel (redesign, mockup "המניות שלי – הדמיה")
 
 Dark theme + Hebrew right-to-left, iPhone-first. The home screen "המניות שלי"
-has the search box and the watchlist (and, from Stage 3, the portfolio). A
+has the search box, **my portfolio** (total in ₪, today, profit/loss; one
+row per stock) and the watchlist. A
 stock opens as one scroll: header, green/red chart, the "bottom line" card,
 Wall Street, 6 key numbers, then collapsed sections (AI, all data,
 technicals, holders). Missing values show "—"; the Debug panel appears only
-with `?debug=1`. Colors live in `.streamlit/config.toml`, the layout CSS at
+with `?debug=1`. Tel-Aviv prices show in ₪ (Yahoo quotes them in agorot).
+On a stock page, "הוספה לתיק" records how many shares and the average buy
+price; `portfolio.py` does the math (foreign stocks converted to ₪ at
+today's rate). Portfolio and watchlist are saved in the browser on that
+device. Colors live in `.streamlit/config.toml`, the layout CSS at
 the top of `app.py`. Some engine texts (signal names, tooltips) are still
 English.
 
@@ -116,6 +121,7 @@ venv\Scripts\python test_app.py      # chart builder, no network (fast)
 venv\Scripts\python test_scan.py     # screener rows, no network
 venv\Scripts\python test_data_store.py  # data store (local + mocked GitHub)
 venv\Scripts\python test_daily_job.py   # daily run: guard, history, ranking, Telegram (mocked)
+venv\Scripts\python test_portfolio.py    # portfolio math + app flow on sample data (offline)
 venv\Scripts\python test_rank.py     # screener ranking + resume, no network
 ```
 

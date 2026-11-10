@@ -22,6 +22,7 @@ import streamlit as st
 import engine  # our pure-Python data engine (no Streamlit inside it)
 import gemini_helper  # OPTIONAL Gemini explanation layer (no-op without a key)
 import famous_investors  # famous-investor 13F holdings from SEC EDGAR (no key)
+import portfolio  # the user's holdings: units, P&L, totals in ₪ (pure Python)
 
 # Basic page configuration (title shown in the browser tab, etc.).
 st.set_page_config(page_title="המניות שלי", page_icon="📈",
@@ -613,6 +614,103 @@ def _goto(symbol):
     st.session_state["pending_query"] = symbol
 
 
+# --- Portfolio (mockup item 4): stored in the browser like the watchlist ---
+
+PORTFOLIO_KEY = "portfolio"
+
+
+def init_portfolio(ls):
+    """Load the holdings into session_state once (from localStorage)."""
+    if ls is not None and not st.session_state.get("_pf_loaded"):
+        raw = ls.getItem(PORTFOLIO_KEY)
+        if raw is not None:
+            st.session_state["portfolio"] = portfolio.parse(raw)
+            st.session_state["_pf_loaded"] = True
+    st.session_state.setdefault("portfolio", [])
+
+
+def persist_portfolio(ls):
+    if ls is None:
+        return
+    try:
+        ls.setItem(PORTFOLIO_KEY, portfolio.dumps(st.session_state["portfolio"]),
+                   key="portfolio_persist")
+    except Exception:
+        pass
+
+
+def _save_holding(symbol):
+    """Form callback: store qty + average cost typed on the stock page."""
+    qty = st.session_state.get(f"pf_qty_{symbol}") or 0
+    cost = st.session_state.get(f"pf_cost_{symbol}") or 0
+    try:
+        st.session_state["portfolio"] = portfolio.upsert(
+            st.session_state.get("portfolio", []), symbol, float(qty), float(cost))
+        st.session_state["_pf_msg"] = ("saved" if qty > 0 else "removed", symbol)
+    except ValueError:
+        st.session_state["_pf_msg"] = ("error", symbol)
+    st.session_state["_pf_dirty"] = True
+
+
+def _remove_holding(symbol):
+    st.session_state["portfolio"] = portfolio.remove(
+        st.session_state.get("portfolio", []), symbol)
+    st.session_state["_pf_msg"] = ("removed", symbol)
+    st.session_state["_pf_dirty"] = True
+
+
+@st.cache_data(ttl=600)
+def load_fx(currency):
+    """Today's rate from `currency` to ₪ (1.0 for ₪), or None if unavailable."""
+    sym = portfolio.fx_symbol(currency)
+    if sym is None:
+        return 1.0
+    try:
+        q = engine.get_stock_quote(sym)
+        return q.price if (q.found and q.price) else None
+    except Exception:
+        return None
+
+
+def portfolio_rows(holdings):
+    """Value every holding with live quotes + FX. Returns (rows, names)."""
+    rows, names = [], {}
+    for h in holdings:
+        price = currency = change = None
+        try:
+            q = load_quote(h["symbol"])
+            if q and q.found:
+                price, currency = portfolio.to_major(q.price, q.currency)
+                change = q.change_pct
+                names[h["symbol"]] = q.name or h["symbol"]
+        except Exception:
+            pass
+        fx = load_fx(currency) if currency else None
+        rows.append(portfolio.position(h, price, currency or "", change, fx))
+    return rows, names
+
+
+def portfolio_card_html(totals):
+    """The 'My portfolio' summary card (total in ₪, today, total P&L)."""
+    if totals["value"] is None:
+        return ('<div class="sa-card"><div class="sa-eyebrow">שווי התיק</div>'
+                '<div class="sa-sub">אין מחירים זמינים כרגע.</div></div>')
+    day = (chip_html(totals["day_pct"], "%") + ' <span class="sa-sub">היום</span>'
+           if totals["day_pct"] is not None else "")
+    pnl = totals["pnl"]
+    pnl_txt = (f'<span class="sa-sub">סה״כ רווח/הפסד: <span class="sa-num">'
+               f'{_esc(portfolio.money(pnl, "ILS", 0))}</span></span> '
+               + chip_html(totals["pnl_pct"], "%")) if pnl is not None else ""
+    missing = (f'<div class="sa-fine">בלי מחיר כרגע: {_esc(", ".join(totals["missing"]))}</div>'
+               if totals["missing"] else "")
+    return ('<div class="sa-card"><div class="sa-eyebrow">שווי התיק</div>'
+            f'<div class="sa-row"><span class="sa-price sa-num">'
+            f'{_esc(portfolio.money(totals["value"], "ILS", 0))}</span>{day}</div>'
+            f'<div>{pnl_txt}</div>{missing}'
+            '<div class="sa-fine">מניות במטבע זר מחושבות בשקלים לפי השער של היום. '
+            'עלות הקנייה מחושבת גם היא לפי השער של היום.</div></div>')
+
+
 # --- Home screen + small HTML building blocks ----------------------------
 
 # Hebrew names for verdict / analyst labels (the engine keeps English keys).
@@ -652,10 +750,28 @@ def chip_html(value, suffix=""):
     return f'<span class="sa-chip {cls}">{value:+.2f}{suffix}</span>'
 
 
+def display_price(price, currency):
+    """A price for display in the MAJOR unit: 13580 ILA -> '₪135.80'."""
+    value, major = portfolio.to_major(price, currency)
+    return portfolio.money(value, major)
+
+
+def major_history(df, currency):
+    """Price history with agorot/pence turned into ₪/£ (other units as-is)."""
+    _, major = portfolio.to_major(1.0, currency)
+    if major == (currency or "") or df is None:
+        return df
+    factor = portfolio.to_major(1.0, currency)[0]
+    out = df.copy()
+    for col in ("Open", "High", "Low", "Close"):
+        if col in out.columns:
+            out[col] = out[col] * factor
+    return out
+
+
 def header_card_html(quote):
     """Name, symbol · exchange, big price and today's change."""
-    cur = quote.currency or ""
-    price = f"{quote.price:,.2f} {cur}" if quote.price is not None else "—"
+    price = display_price(quote.price, quote.currency)
     today = (chip_html(quote.change_pct, "%") + ' <span class="sa-sub">היום</span>'
              if quote.change_pct is not None else '<span class="sa-sub">אין נתון יומי</span>')
     return (
@@ -800,6 +916,30 @@ def _go_home():
     st.session_state["search_box"] = ""
 
 
+def render_portfolio_home():
+    """'My portfolio' on the home screen: the summary card + one row per stock."""
+    st.markdown("#### התיק שלי")
+    holdings = st.session_state.get("portfolio", [])
+    if not holdings:
+        st.caption("עוד אין מניות בתיק. פתח מניה ולחץ **הוספה לתיק** כדי לרשום "
+                   "כמה מניות קנית ובאיזה מחיר.")
+        return
+    rows, names = portfolio_rows(holdings)
+    st.markdown(portfolio_card_html(portfolio.summarize(rows)), unsafe_allow_html=True)
+    with st.container(key="portfolio_rows"):
+        for r in rows:
+            sym = r["symbol"]
+            qty = f"{r['qty']:,.4g}"
+            label = f"**{names.get(sym, sym)}** · \u2066{qty}\u2069 מניות"
+            if r["value"] is not None:
+                label += f" · \u2066{portfolio.money(r['value'], r['currency'], 0)}\u2069"
+            if r["pnl_pct"] is not None:
+                color = "green" if r["pnl_pct"] >= 0 else "red"
+                label += f" · :{color}[\u2066{r['pnl_pct']:+.1f}%\u2069]"
+            st.button(label, key=f"pf_view_{sym}", on_click=_goto, args=(sym,),
+                      width="stretch")
+
+
 def render_watchlist_home():
     """The followed stocks as tappable rows on the home screen."""
     st.markdown("#### במעקב")
@@ -816,7 +956,7 @@ def render_watchlist_home():
                 q = load_quote(sym)
                 if q and q.found:
                     label = (f"**{q.name or sym}** · \u2066{sym}\u2069 · "
-                             f"\u2066{q.price:,.2f} {q.currency or ''}\u2069")
+                             f"\u2066{display_price(q.price, q.currency)}\u2069")
                     if q.change_pct is not None:
                         color = "green" if q.change_pct >= 0 else "red"
                         label += f" · :{color}[\u2066{q.change_pct:+.2f}%\u2069]"
@@ -836,6 +976,7 @@ def render_watchlist_home():
 # Load the watchlist first. A row click stores a pending query that we move
 # into the search box BEFORE the widget is created (Streamlit rule).
 ls = init_watchlist()
+init_portfolio(ls)
 if "pending_query" in st.session_state:
     st.session_state["search_box"] = st.session_state.pop("pending_query")
 
@@ -856,6 +997,7 @@ query = st.text_input(
 ).strip()
 
 if home:
+    render_portfolio_home()
     render_watchlist_home()
     st.caption("טיפ: מניות בבורסה בתל אביב מסתיימות ב-`.TA`, למשל `TEVA.TA`. "
                "החיפוש לא עובד לפי מספר נייר.")
@@ -936,6 +1078,40 @@ if symbol:
             key="wl_toggle", on_click=_toggle_watchlist, args=(symbol,),
         )
 
+        # ======================= My holding (portfolio) =======================
+        holding = portfolio.find(st.session_state.get("portfolio", []), symbol)
+        price_major, major_ccy = portfolio.to_major(quote.price, quote.currency)
+        msg = st.session_state.pop("_pf_msg", None)
+        if msg and msg[1] == symbol:
+            text = {"saved": "נשמר בתיק.", "removed": "הוסר מהתיק.",
+                    "error": "המחיר צריך להיות מספר חיובי."}[msg[0]]
+            (st.error if msg[0] == "error" else st.success)(text)
+        if holding:
+            row = portfolio.position(holding, price_major, major_ccy, quote.change_pct)
+            pnl = (f" · רווח/הפסד \u2066{portfolio.money(row['pnl'], major_ccy)}\u2069 "
+                   f"(\u2066{row['pnl_pct']:+.1f}%\u2069)"
+                   if row["pnl"] is not None and row["pnl_pct"] is not None else "")
+            title = f"בתיק: \u2066{holding['qty']:,.4g}\u2069 מניות{pnl}"
+        else:
+            title = "+ הוספה לתיק"
+        with st.expander(title, expanded=False):
+            with st.form(key=f"pf_form_{symbol}", border=False):
+                c1, c2 = st.columns(2)
+                c1.number_input("כמה מניות?", min_value=0.0, step=1.0, format="%g",
+                                value=float(holding["qty"]) if holding else 0.0,
+                                key=f"pf_qty_{symbol}")
+                c2.number_input(f"מחיר קנייה ממוצע למניה ({portfolio.CURRENCY_SYMBOLS.get(major_ccy, major_ccy)})",
+                                min_value=0.0, step=0.01, format="%.2f",
+                                value=float(holding["cost"]) if holding
+                                else float(round(price_major or 0.0, 2)),
+                                key=f"pf_cost_{symbol}")
+                st.form_submit_button("שמור", on_click=_save_holding, args=(symbol,),
+                                      type="primary", width="stretch")
+            if holding:
+                st.button("הסר מהתיק", key=f"pf_rm_{symbol}", on_click=_remove_holding,
+                          args=(symbol,), width="stretch")
+            st.caption("נשמר בדפדפן במכשיר הזה. כמות 0 מוציאה את המניה מהתיק.")
+
         # ======================= Price chart =======================
         range_key = st.segmented_control(
             "טווח",
@@ -945,6 +1121,8 @@ if symbol:
             label_visibility="collapsed",
         ) or "6M"  # clicking the active button deselects it -> keep a chart
         history = load_history(symbol, range_key)
+        if history.found:  # agorot -> ₪ so the chart matches the header
+            history.data = major_history(history.data, quote.currency)
         chart_type = st.session_state.get("chart_type", "קו")
         as_percent = st.session_state.get("as_percent", False)
 
@@ -1022,14 +1200,15 @@ if symbol:
                         st.caption(f"{analyst.num_analysts} אנליסטים")
 
                 if analyst.target_mean and analyst.current_price:
-                    cur = analyst.currency or ""
+                    cur = analyst.currency or quote.currency or ""
                     up = analyst.upside_pct or 0.0
                     st.markdown(
-                        f"**יעד מחיר ממוצע:** <span class='sa-num'>{analyst.target_mean:,.2f} {cur}</span> "
+                        f"**יעד מחיר ממוצע:** <span class='sa-num'>"
+                        f"{_esc(display_price(analyst.target_mean, cur))}</span> "
                         f"{chip_html(up, '%')}", unsafe_allow_html=True)
                     if analyst.target_low and analyst.target_high:
-                        st.caption(f"טווח היעדים: {analyst.target_low:,.2f} עד "
-                                   f"{analyst.target_high:,.2f} {cur}")
+                        st.caption(f"טווח היעדים: \u2066{display_price(analyst.target_low, cur)}"
+                                   f"\u2069 עד \u2066{display_price(analyst.target_high, cur)}\u2069")
                 st.caption("זה מה שוול סטריט מצפה לו, לא התחזית שלנו.")
 
                 # ALWAYS say something about how we compare to the analysts.
@@ -1242,3 +1421,5 @@ if symbol:
 # (Callbacks set "_wl_dirty"; we persist once here so the write happens last.)
 if st.session_state.pop("_wl_dirty", False):
     persist_watchlist(ls)
+if st.session_state.pop("_pf_dirty", False):
+    persist_portfolio(ls)
