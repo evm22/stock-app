@@ -67,6 +67,15 @@ debt. The formula and its knobs are at the top of `rank.py`.
 The daily run that does all of this automatically is described under
 **Daily automatic run** below.
 
+## Look & feel (redesign Stage 2)
+
+Dark theme + Hebrew right-to-left interface, following the mockup
+"המניות שלי – הדמיה": `.streamlit/config.toml` (colors, committed) plus a small
+CSS block at the top of `app.py`. Six key metrics up front (the rest under
+"כל הנתונים"), missing values shown as "—", a clean green/red line chart
+(candles and % stay available), and the Debug panel only with `?debug=1` in
+the URL. Signal breakdowns from the engine are still in English.
+
 ## Run it locally
 
 ```bash

@@ -169,8 +169,8 @@ def expect_format_metric_by_fmt():
     def m(value, fmt, available=True):
         return engine.Metric("label", value, available, fmt, "src")
 
-    # Missing values always show a friendly n/a, whatever the fmt.
-    assert app.format_metric(m(None, "money", available=False), "USD") == "n/a"
+    # Missing values always show a dash, whatever the fmt (was "n/a").
+    assert app.format_metric(m(None, "money", available=False), "USD") == "—"
 
     # Money formats carry the currency; ratios/percents do not.
     assert app.format_metric(m(4_362_291_642_368, "large_money"), "USD") == "4.36T USD"
@@ -453,6 +453,51 @@ def expect_universe_structure():
           f"NVDA themes={sorted(nv)}")
 
 
+def expect_key_metric_tiles():
+    """The 6 key tiles: Hebrew labels in order, a dash for missing values, a
+    colored dot where the engine has a rule, and none for missing data."""
+    def group(metrics, currency="USD"):
+        return engine.MetricGroup(found=True, symbol="X", metrics=metrics,
+                                  currency=currency)
+    def m(value, fmt):
+        return engine.Metric("label", value, value is not None, fmt, "src")
+    company = group({
+        "pe": m(12.0, "ratio"), "revenue_growth": m(0.25, "percent_frac"),
+        "profit_margin": m(None, "percent_frac"), "debt_to_equity": m(400.0, "ratio"),
+        "dividend_yield": m(None, "percent"),
+    })
+    technicals = group({"beta": m(1.1, "ratio")})
+    tiles = app.key_metric_tiles(company, technicals, {"sector": None, "price": 10})
+    labels = [t[0].split(" ", 1)[-1] if t[0][0] in "🟢🟡🔴" else t[0] for t in tiles]
+    assert labels == ["מכפיל רווח", "צמיחת הכנסות", "שולי רווח", "חוב להון",
+                      "תשואת דיבידנד", "בטא"], labels
+    values = [t[1] for t in tiles]
+    assert values[0] == "12.00" and values[1] == "25.00%", values
+    assert values[2] == "—" and values[4] == "—", values
+    assert not tiles[2][0].startswith(("🟢", "🟡", "🔴")), "missing -> no dot"
+    assert tiles[3][0].startswith("🔴"), f"heavy debt should be red: {tiles[3][0]}"
+    assert all(t[2] for t in tiles), "every tile has a Hebrew help text"
+    # A whole group missing still gives 6 dashes, never a crash.
+    none_tiles = app.key_metric_tiles(None, None)
+    assert [t[1] for t in none_tiles] == ["—"] * 6
+    print(f"      key tiles: {[t[0] for t in tiles]}")
+
+
+def expect_line_chart_colors():
+    """The clean line chart is green when the range ended up, red when down."""
+    up = pd.DataFrame({"Date": pd.date_range("2026-01-01", periods=3),
+                       "Close": [10.0, 11.0, 12.0]})
+    down = up.assign(Close=[12.0, 11.0, 10.0])
+    def line_color(chart):
+        return chart.to_dict()["mark"]["line"]["color"]
+    assert line_color(app.make_line_chart(up)) == app.UP_COLOR
+    assert line_color(app.make_line_chart(down)) == app.DOWN_COLOR
+    pct = up.rename(columns={"Close": "Pct"})
+    d = app.make_line_chart(pct, "Pct", "% שינוי").to_dict()
+    assert d["encoding"]["y"]["field"] == "Pct"
+    print("      line chart: green up / red down, % mode uses Pct")
+
+
 def test_password_gate():
     """The password lock: constant-time compare, and OFF when no password set."""
     assert app.password_ok("abc", "abc")
@@ -499,6 +544,10 @@ def main():
               expect_famous_investors_offline),
         check("password gate: compare + off when not configured (no network)",
               test_password_gate),
+        check("6 key metric tiles: Hebrew labels, dash for missing, dots",
+              expect_key_metric_tiles),
+        check("clean line chart: green when up, red when down",
+              expect_line_chart_colors),
         check("universe: theme/region tagging + merge + mocked fetch (no network)",
               expect_universe_structure),
     ]

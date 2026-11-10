@@ -23,7 +23,10 @@ secrets.toml
 *.pem
 
 # --- Streamlit ---
-.streamlit/
+# Everything in .streamlit/ stays private EXCEPT the theme file (config.toml),
+# which holds no secrets and must be committed so the live app gets the theme.
+.streamlit/*
+!.streamlit/config.toml
 
 # --- IDE / editor ---
 .vscode/
