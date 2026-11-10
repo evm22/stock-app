@@ -57,6 +57,10 @@ def get_stock_quote(t):
     t = (t or "").upper()
     if t in FX:
         return engine.StockQuote(True, t, t, FX[t], "ILS", FX[t], 0.0, 0.0, "CCY", "demo", "demo", {})
+    if t in INDEXES:
+        p = INDEXES[t][0]
+        return engine.StockQuote(True, t, t, p, "ILS" if t.endswith(".TA") else "USD", p,
+                                 0.0, 0.0, "INDEX", "demo", "demo", {})
     if t not in SAMPLE:
         return engine.StockQuote(False, t)
     s = SAMPLE[t]
@@ -74,8 +78,24 @@ def find_tickers(q, max_results=6):
             for k in hits]
 
 
+INDEXES = {"^TA125.TA": (3945.8, 0.0009, 31), "^GSPC": (7549.9, 0.0006, 41)}  # FAKE
+
+
+def _index_hist(t, range_key):
+    last, trend, seed = INDEXES[t]
+    n = {"1Y": 252, "6M": 126}.get(range_key, 60)
+    rng = np.random.default_rng(seed)
+    close = np.exp(rng.normal(trend, 0.009, n).cumsum())
+    close = close * last / close[-1]
+    dates = pd.date_range(end=pd.Timestamp("2026-11-09"), periods=n, freq="B")
+    return pd.DataFrame({"Date": dates, "Open": close, "High": close, "Low": close,
+                         "Close": close, "Volume": 0})
+
+
 def get_price_history(t, range_key):
     t = t.upper()
+    if t in INDEXES:
+        return engine.PriceHistory(True, t, range_key, data=_index_hist(t, range_key))
     if t not in SAMPLE:
         return engine.PriceHistory(False, t, range_key, reason="unknown")
     return engine.PriceHistory(True, t, range_key, data=_hist(t, range_key))

@@ -28,6 +28,7 @@ import portfolio  # the user's trades -> holdings, P&L, tax, totals in ₪ (pure
 import buy_score  # 50% engine + 30% analysts + 20% AI news -> -100..+100
 import news  # latest headlines from free sources (Yahoo, Google News RSS)
 import ai_insights  # numbers behind the AI overview / picks (pure Python)
+import benchmark  # portfolio vs TA-125 / S&P 500 with the same money on the same days
 
 # Basic page configuration (title shown in the browser tab, etc.).
 st.set_page_config(page_title="המניות שלי", page_icon="📈",
@@ -61,6 +62,10 @@ h1, h2, h3, h4 { font-family: "Rubik", "Assistant", system-ui, sans-serif !impor
 [data-testid="stDataFrame"], [data-testid="stTable"], .vega-embed { direction: ltr; text-align: left; }
 /* Range buttons (1D ... 5Y) read left-to-right like on every chart app. */
 [data-testid="stButtonGroup"] { direction: ltr; }
+/* ...but the Hebrew choices (home tabs, index picker, trade side) read right-to-left. */
+.st-key-home_tab [data-testid="stButtonGroup"], .st-key-bench_index [data-testid="stButtonGroup"],
+[class*="st-key-trade_side_"] [data-testid="stButtonGroup"] { direction: rtl; }
+.sa-brand { font-family: Rubik, sans-serif; font-weight: 700; font-size: 1.6rem; margin: 0 0 0.6rem; }
 [data-testid="stCode"], [data-testid="stCode"] pre { direction: ltr; text-align: left; }
 .sa-num { direction: ltr; unicode-bidi: isolate; display: inline-block; font-variant-numeric: tabular-nums; }
 
@@ -83,9 +88,9 @@ h1, h2, h3, h4 { font-family: "Rubik", "Assistant", system-ui, sans-serif !impor
   background: var(--sa-surface2); border-radius: 14px; padding: 0.45rem 0.7rem; }
 
 /* Watchlist rows on the home screen: full-width buttons that read as list rows. */
-.st-key-watchlist button, .st-key-portfolio_rows button { justify-content: flex-start; text-align: right; border-radius: 14px;
+.st-key-watchlist button, .st-key-portfolio_rows button, [class*="st-key-picks_"] button { justify-content: flex-start; text-align: right; border-radius: 14px;
   background: var(--sa-surface); border: 1px solid var(--sa-line); padding: 0.7rem 0.9rem; }
-.st-key-watchlist button p, .st-key-portfolio_rows button p { font-size: 1rem; }
+.st-key-watchlist button p, .st-key-portfolio_rows button p, [class*="st-key-picks_"] button p { font-size: 1rem; white-space: pre-line; line-height: 1.45; }
 .sa-warn { color: var(--sa-hold); font-size: 0.8rem; margin-top: 0.5rem; }
 
 /* Small HTML cards. */
@@ -799,7 +804,7 @@ def portfolio_rows(holdings):
             if q and q.found:
                 price, currency = portfolio.to_major(q.price, q.currency)
                 change = q.change_pct
-                names[h["symbol"]] = q.name or h["symbol"]
+                names[h["symbol"]] = short_name(q.name, h["symbol"])
         except Exception:
             pass
         fx = load_fx(currency) if currency else None
@@ -1068,6 +1073,21 @@ def chip_html(value, suffix=""):
     return f'<span class="sa-chip {cls}">{value:+.2f}{suffix}</span>'
 
 
+_NAME_SUFFIXES = (", Inc.", " Inc.", " Inc", " Corporation", " Corp.", " Corp", " Limited",
+                  " Ltd.", " Ltd", " plc", " PLC", " N.V.", " S.A.", " AG", " SE",
+                  " Holdings", " Industries", " Group", " Co.", " Company", " B.M.")
+
+
+def short_name(name, symbol=""):
+    """'Teva Pharmaceutical Industries Limited' -> 'Teva Pharmaceutical'."""
+    name = (name or "").strip() or symbol
+    for _ in range(3):
+        for suf in _NAME_SUFFIXES:
+            if name.endswith(suf) and len(name) > len(suf) + 2:
+                name = name[: -len(suf)].rstrip(" ,&")
+    return name
+
+
 def display_price(price, currency):
     """A price for display in the MAJOR unit: 13580 ILA -> '₪135.80'."""
     value, major = portfolio.to_major(price, currency)
@@ -1093,9 +1113,11 @@ def header_card_html(quote):
     today = (chip_html(quote.change_pct, "%") + ' <span class="sa-sub">היום</span>'
              if quote.change_pct is not None else '<span class="sa-sub">אין נתון יומי</span>')
     return (
-        f'<div class="sa-name">{_esc(quote.name or quote.symbol)}</div>'
+        f'<div class="sa-name">{_esc(short_name(quote.name, quote.symbol))}</div>'
         f'<div class="sa-sub"><span class="sa-num">{_esc(quote.symbol)}</span> · '
-        f'{_esc(quote.exchange or "")}</div>'
+        f'{_esc(quote.exchange or "")}'
+        + (f' · {_esc(quote.name)}' if quote.name and short_name(quote.name) != quote.name else "")
+        + '</div>'
         f'<div class="sa-row"><span class="sa-price sa-num">{html_safe(_esc(price))}</span>{today}</div>'
     )
 
@@ -1261,16 +1283,15 @@ def render_portfolio_home():
         for r in rows:
             sym = r["symbol"]
             qty = f"{r['qty']:,.4g}"
-            label = f"**{names.get(sym, sym)}** · \u2066{qty}\u2069 מניות"
+            label = f"**{md_safe(names.get(sym, sym))}**{score_tag(score_for(sym))}\n\u2066{qty}\u2069 מניות"
             if r["value"] is not None:
                 label += f" · \u2066{md_safe(portfolio.money(r['value'], r['currency'], 0))}\u2069"
             if r["pnl_pct"] is not None:
                 color = "green" if r["pnl_pct"] >= 0 else "red"
                 label += f" · :{color}[\u2066{r['pnl_pct']:+.1f}%\u2069]"
-            label += score_tag(score_for(sym))
             st.button(label, key=f"pf_view_{sym}", on_click=_goto, args=(sym,),
                       width="stretch")
-    render_portfolio_overview(rows, names)
+    render_portfolio_overview(rows, names, data)
 
 
 # --- Portfolio overview (mockup item 14) ----------------------------------
@@ -1292,7 +1313,7 @@ def _run_ai_overview(sig, facts_payload):
         st.session_state["_ai_overview_failed"] = True
 
 
-def render_portfolio_overview(rows, names):
+def render_portfolio_overview(rows, names, data=None):
     """Facts computed in code + (on request) AI strengths / weaknesses / ideas."""
     scores = {r["symbol"]: score_for(r["symbol"])["score"] for r in rows}
     facts = ai_insights.portfolio_facts(rows, scores, names)
@@ -1320,6 +1341,8 @@ def render_portfolio_overview(rows, names):
             + "".join(f'<span>{_esc(n)} <span class="sa-num">{p:.0f}%</span></span>'
                       for _, n, p in facts["weights"])
             + "</div>", unsafe_allow_html=True)
+        if data:
+            render_vs_index(data)
 
         sig = ai_insights.signature(facts)
         item = _ai_overview_store().get(sig)
@@ -1344,6 +1367,104 @@ def render_portfolio_overview(rows, names):
                    "החולשות והרעיונות. רעיונות לבדיקה, לא ייעוץ השקעות.")
 
 
+# --- Portfolio vs the index (mockup item 17) -------------------------------
+
+BENCH_LABELS = {v["name"]: k for k, v in benchmark.INDEXES.items()}
+
+
+@st.cache_data(ttl=3600)
+def load_closes(symbol):
+    """One year of daily closes in the MAJOR unit: [(iso_date, close)], or []."""
+    try:
+        h = load_history(symbol, "1Y")
+        if not h.found:
+            return []
+        q = load_quote(symbol)
+        df = major_history(h.data, q.currency if (q and q.found) else "")
+        df = df[["Date", "Close"]].dropna()
+        return [(pd.Timestamp(t).date().isoformat(), float(c))
+                for t, c in zip(df["Date"], df["Close"])]
+    except Exception:
+        return []
+
+
+def _symbol_fx(symbol):
+    try:
+        q = load_quote(symbol)
+        if q and q.found:
+            return load_fx(portfolio.to_major(q.price, q.currency)[1])
+    except Exception:
+        pass
+    return None
+
+
+def make_vs_index_chart(points, index_name):
+    rows = []
+    for d, mine, ix in points:
+        rows.append({"Date": d, "line": "התיק שלך", "pct": mine})
+        rows.append({"Date": d, "line": index_name, "pct": ix})
+    df = pd.DataFrame(rows)
+    color = alt.Color("line:N", legend=None, scale=alt.Scale(
+        domain=["התיק שלך", index_name], range=["#8EA2FF", "#8B97AA"]))
+    dash = alt.StrokeDash("line:N", legend=None, scale=alt.Scale(
+        domain=["התיק שלך", index_name], range=[[1, 0], [4, 3]]))
+    return (alt.Chart(df).mark_line(strokeWidth=2.2).encode(
+                x=alt.X("Date:T", title=None, axis=alt.Axis(grid=False, labelColor="#8B97AA",
+                                                            domain=False, ticks=False, tickCount=4)),
+                y=alt.Y("pct:Q", title=None, axis=alt.Axis(format="+.0f", grid=True,
+                        gridOpacity=0.12, domain=False, ticks=False, labelColor="#8B97AA",
+                        tickCount=4, labelExpr="datum.label + '%'")),
+                color=color, strokeDash=dash,
+                tooltip=[alt.Tooltip("Date:T", title="תאריך"), alt.Tooltip("line:N", title=""),
+                         alt.Tooltip("pct:Q", format="+.1f", title="%")])
+            .properties(height=170).configure_view(strokeWidth=0)
+            .configure(background="transparent"))
+
+
+def render_vs_index(data):
+    """'Vs the index': the same money, on the same days, into TA-125 / S&P 500."""
+    txs = data.get("transactions", [])
+    if not txs:
+        return
+    st.markdown('<h4 style="margin:0.9rem 0 0.2rem">מול המדד '
+                '<span class="sa-sub" style="font-weight:400">שנה אחרונה</span></h4>',
+                unsafe_allow_html=True)
+    names = list(BENCH_LABELS)
+    choice = st.segmented_control("מדד", names, default=names[0], key="bench_index",
+                                  label_visibility="collapsed") or names[0]
+    index = benchmark.INDEXES[BENCH_LABELS[choice]]
+    symbols = sorted({t["symbol"] for t in txs})
+    result = benchmark.compare(
+        txs, {s: load_closes(s) for s in symbols}, {s: _symbol_fx(s) for s in symbols},
+        load_closes(index["symbol"]))
+    if result is None:
+        st.caption("אין כרגע מספיק נתוני מחירים כדי להשוות למדד.")
+        return
+    if len(result["points"]) < benchmark.MIN_POINTS:
+        start = datetime.fromisoformat(result["start"]).strftime("%d.%m.%Y")
+        st.caption(f"עוד מוקדם להשוות: העסקאות בתיק הן מ-\u2066{start}\u2069. ההשוואה תופיע "
+                   "אחרי שבוע מסחר. אם קנית לפני כן, אפשר לתקן את תאריך הקנייה "
+                   "ב״עסקאות ומס״ (מחיקה ורישום מחדש).")
+        return
+    st.altair_chart(make_vs_index_chart(result["points"], choice), width="stretch")
+    win = result["diff"] >= 0
+    st.markdown(html_safe(
+        '<div class="sa-sub" style="display:flex;gap:14px;flex-wrap:wrap">'
+        '<span><i style="display:inline-block;width:12px;height:3px;background:var(--sa-accent);'
+        'vertical-align:middle;margin-inline-end:5px"></i>התיק שלך '
+        f'<b class="sa-num" style="color:var(--sa-fg)">{result["my_pct"]:+.1f}%</b></span>'
+        '<span><i style="display:inline-block;width:12px;height:0;border-top:3px dashed var(--sa-muted);'
+        f'vertical-align:middle;margin-inline-end:5px"></i>{_esc(choice)} '
+        f'<b class="sa-num" style="color:var(--sa-fg)">{result["idx_pct"]:+.1f}%</b></span></div>'
+        f'<p style="margin:6px 0 0;font-weight:700;color:var(--sa-{"up" if win else "down"})">'
+        f'{_esc(benchmark.verdict_he(result, choice))}</p>'), unsafe_allow_html=True)
+    start = datetime.fromisoformat(result["start"]).strftime("%d.%m.%Y")
+    extra = (f" בלי {', '.join(result['missing'])} (אין היסטוריית מחירים)."
+             if result["missing"] else "")
+    st.caption(f"כאילו כל קנייה מאז ⁦{start}⁩ הייתה נכנסת למדד באותו יום ובאותו סכום, "
+               f"וכל מכירה הייתה מוכרת את אותו חלק. ההשוואה לא כוללת דיבידנדים ועמלות.{extra}")
+
+
 # --- "AI recommends" (mockup item 15) ------------------------------------
 
 def load_ai_picks():
@@ -1351,6 +1472,22 @@ def load_ai_picks():
         return data_store.read_json("data/ai_picks.json", None, **_store_kwargs())
     except Exception:
         return None
+
+
+def _pick_label(sym):
+    """'**Salesforce** · CRM' + price and today's change on a second line."""
+    try:
+        q = load_quote(sym)
+    except Exception:
+        q = None
+    if not (q and q.found):
+        return f"**\u2066{sym}\u2069**"
+    label = (f"**{md_safe(short_name(q.name, sym))}** · \u2066{sym}\u2069\n"
+             f"\u2066{md_safe(display_price(q.price, q.currency))}\u2069")
+    if q.change_pct is not None:
+        color = "green" if q.change_pct >= 0 else "red"
+        label += f" · :{color}[\u2066{q.change_pct:+.2f}%\u2069] היום"
+    return label
 
 
 def render_ai_picks_home():
@@ -1370,10 +1507,11 @@ def render_ai_picks_home():
         with st.container(border=True):
             st.markdown(f"#### {title} <span class='sa-sub'>{hint}</span>",
                         unsafe_allow_html=True)
-            for p in picks[key]:
-                st.button(f"**\u2066{p['symbol']}\u2069**", key=f"pick_{key}_{p['symbol']}",
-                          on_click=_goto, args=(p["symbol"],), width="stretch")
-                st.caption(md_safe(p["why"]))
+            with st.container(key=f"picks_{key}"):
+                for p in picks[key]:
+                    st.button(_pick_label(p["symbol"]), key=f"pick_{key}_{p['symbol']}",
+                              on_click=_goto, args=(p["symbol"],), width="stretch")
+                    st.caption(md_safe(p["why"]))
     try:
         when = date.fromisoformat(picks["day"]).strftime("%d.%m.%Y")
     except (KeyError, ValueError):
@@ -1521,7 +1659,7 @@ def render_news_section(symbol, name):
             line = f"[{title}]({h['link']})" if h.get("link") else title
             st.markdown(f"{line}  \n<span class='sa-sub'>{_esc(meta)}</span>",
                         unsafe_allow_html=True)
-        st.caption("כותרות וקישורים בלבד, ממקורות חינמיים (Yahoo / Google News).")
+        st.caption("כותרות וקישורים בלבד, ממקורות חינמיים: \u2066Yahoo / Google News\u2069.")
 
 
 def render_watchlist_home():
@@ -1539,12 +1677,13 @@ def render_watchlist_home():
             try:
                 q = load_quote(sym)
                 if q and q.found:
-                    label = (f"**{q.name or sym}** · \u2066{sym}\u2069 · "
-                             f"\u2066{md_safe(display_price(q.price, q.currency))}\u2069")
+                    label = (f"**{md_safe(short_name(q.name, sym))}**{score_tag(score_for(sym))}\n"
+                             f"\u2066{sym}\u2069 · \u2066{md_safe(display_price(q.price, q.currency))}\u2069")
                     if q.change_pct is not None:
                         color = "green" if q.change_pct >= 0 else "red"
                         label += f" · :{color}[\u2066{q.change_pct:+.2f}%\u2069]"
-                label += score_tag(score_for(sym))
+                else:
+                    label += score_tag(score_for(sym))
             except Exception:
                 pass
             st.button(label, key=f"wl_view_{sym}", on_click=_goto, args=(sym,),
@@ -1570,7 +1709,7 @@ if "pending_query" in st.session_state:
 home = not (st.session_state.get("search_box") or "").strip()
 
 if home:
-    st.title("המניות שלי")
+    st.markdown('<div class="sa-brand">המניות שלי</div>', unsafe_allow_html=True)
 else:
     st.button("→ המניות שלי", key="back_home", on_click=_go_home)
 

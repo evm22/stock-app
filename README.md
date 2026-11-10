@@ -105,6 +105,11 @@ number, the AI only writes words):
 - *מבט על התיק* (home, under the portfolio): weights, the biggest position,
   share in Israel and the value-weighted average buy score; "נתח את התיק עם
   AI" adds strengths / weaknesses / ideas (one Gemini call, cached 24 h).
+- *מול המדד* (inside that card, `benchmark.py`): the portfolio vs TA-125
+  (`^TA125.TA`) or the S&P 500 (`^GSPC`) over the last year, as a shadow
+  portfolio: the same ₪ on the same days into the index, and a sale of X% of
+  a stock sells X% of its index units. Gain = value + cash out - cash in, in %
+  of the cash in. No dividends or fees; needs a week of history.
 - *ה-AI ממליץ* (home tab): every morning the daily job keeps the 10 strongest
   stocks for the short term (6-month view) and 10 for the long term (5-year
   view) out of ~611, and Gemini picks 2-3 of each with a reason (only from
@@ -157,6 +162,7 @@ venv\Scripts\python test_portfolio.py    # portfolio math: trades, P/L, tax, bac
 venv\Scripts\python test_portfolio_ui.py # portfolio screens on sample data (AppTest, offline)
 venv\Scripts\python test_buy_score.py    # buy score, news parsing, AI reply parsing, score in app (offline)
 venv\Scripts\python test_ai_insights.py  # portfolio facts, AI picks (code fallback), both screens (offline)
+venv\Scripts\python test_benchmark.py    # portfolio vs index (shadow portfolio) + the app block (offline)
 venv\Scripts\python test_rank.py     # screener ranking + resume, no network
 ```
 

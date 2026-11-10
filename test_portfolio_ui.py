@@ -78,7 +78,7 @@ class TestPortfolioUI(unittest.TestCase):
         at.button(key="back_home").click().run()
         page = texts(at)
         self.assertIn("שווי התיק", page)
-        self.assertIn("NVIDIA Corporation", page)
+        self.assertIn("**NVIDIA**", page)               # short name in the row
         # 10 x $182.40 x 3.72 = ₪6,785
         self.assertIn("₪6,785", page)
 
