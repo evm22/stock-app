@@ -32,6 +32,21 @@ import ai_insights  # numbers behind the AI overview / picks (pure Python)
 import benchmark  # portfolio vs TA-125 / S&P 500 with the same money on the same days
 import events  # this week's earnings reports and dividends (Yahoo calendar)
 
+# Streamlit Cloud updates the files on a push but keeps the modules above in
+# memory, so new code in portfolio.py etc. was missing until a manual reboot
+# (AttributeError: no merge_watchlists). Reload a module when its file changed.
+import importlib  # noqa: E402
+
+for _mod in (data_store, portfolio, buy_score, news, ai_insights, benchmark, events,
+             gemini_helper, famous_investors, engine):
+    try:
+        _mtime = os.path.getmtime(_mod.__file__)
+        if getattr(_mod, "_file_mtime", _mtime) != _mtime:
+            importlib.reload(_mod)
+        _mod._file_mtime = _mtime
+    except Exception:
+        pass
+
 # Basic page configuration (title shown in the browser tab, etc.).
 st.set_page_config(page_title="המניות שלי", page_icon="📈",
                    initial_sidebar_state="collapsed")
