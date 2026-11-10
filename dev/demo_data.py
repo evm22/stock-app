@@ -50,7 +50,7 @@ def _hist(sym, range_key):
                          "Close": close, "Volume": vol})
 
 
-FX = {"ILS=X": 3.72}  # fake dollar rate in shekels
+FX = {"USDILS=X": 3.72}  # fake dollar rate in shekels
 
 
 def get_stock_quote(t):

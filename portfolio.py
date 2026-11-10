@@ -1,32 +1,185 @@
 """
-portfolio.py -- the user's own trades and what they add up to.
+portfolio.py -- the user's real portfolio: trades, holdings, profit, tax.
 
-Pure Python (no Streamlit), so it can be tested offline and used by the daily
-job later. The app keeps the data with data_store (a local folder now, the
-private GitHub repo once it's connected).
+Pure Python, no Streamlit and no network: app.py passes in quotes and FX
+rates, this module does the arithmetic, so everything here is unit-tested
+offline (test_portfolio.py).
 
-The stored data is a small JSON document:
+What's stored is the list of TRADES (buys and sells), in data/portfolio.json
+through data_store (a local folder now, the private GitHub repo once it's
+connected):
 
     {"version": 1, "transactions": [
-        {"id": "t1", "symbol": "NVDA", "side": "buy", "qty": 20,
-         "price": 118.0, "currency": "USD", "date": "2026-01-14"},
-        ...]}
+        {"id": "a1b2c3", "symbol": "NVDA", "side": "buy", "qty": 20,
+         "price": 118.0, "currency": "USD", "date": "2026-01-14"}, ...]}
+
+The holdings are worked out from the trades (compute -> as_holdings). A
+holding is a small dict:
+    {"symbol": "NVDA", "qty": 20.0, "cost": 118.0}
+`cost` is the average buy price PER SHARE in the stock's MAJOR currency unit
+(dollars, shekels -- never agorot).
 
 Money rules (kept simple and stated in the UI):
-  * Cost uses the AVERAGE price paid. A sale doesn't change the average cost
-    of the shares that are left.
+  * Average cost: a sale doesn't change the average cost of what's left.
   * Realized profit on a sale = (sale price - average cost) x shares sold.
-  * Tax is only a rough estimate: 25% of the year's net realized profit in
-    each currency (gains minus losses), with no fees, inflation adjustment or
-    shekel conversion at the trade dates.
-  * Tel Aviv prices on Yahoo are in agorot ("ILA"); they're converted to
-    shekels so they match what people type in.
+  * Tax is a rough estimate only: 25% of the year's net realized profit in
+    each currency, no fees, no inflation adjustment, no FX at trade dates.
+
+Money units: Yahoo quotes Tel-Aviv stocks in agorot ("ILA", 1/100 shekel)
+and London stocks in pence ("GBp"). to_major() converts those to ₪ / £ so
+the app shows (and the user types) normal prices.
 """
 
 import json
+import math
 import uuid
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
+
+# Yahoo "minor unit" currencies -> (major currency, divisor)
+_MINOR_UNITS = {"ILA": ("ILS", 100.0), "ILX": ("ILS", 100.0),
+                "GBp": ("GBP", 100.0), "GBX": ("GBP", 100.0)}
+
+CURRENCY_SYMBOLS = {"ILS": "₪", "USD": "$", "EUR": "€", "GBP": "£"}
+
+HOME_CURRENCY = "ILS"   # portfolio totals are shown in shekels
+
+
+def _num(x):
+    return (isinstance(x, (int, float)) and not isinstance(x, bool)
+            and math.isfinite(x))
+
+
+def to_major(price, currency):
+    """(price, currency) in the major unit: 13580 ILA -> (135.80, 'ILS')."""
+    major, div = _MINOR_UNITS.get(currency or "", (currency or "", 1.0))
+    if not _num(price):
+        return None, major
+    return price / div, major
+
+
+def money(value, currency, decimals=2, signed=False):
+    """'₪1,234.50' / '$182.40' / '1,234.50 CHF'. None -> '—'.
+    signed=True puts a '+' in front of a gain."""
+    if not _num(value):
+        return "—"
+    sym = CURRENCY_SYMBOLS.get(currency)
+    body = f"{abs(value):,.{decimals}f}"
+    sign = "-" if value < 0 else ("+" if signed and value > 0 else "")
+    return f"{sign}{sym}{body}" if sym else f"{sign}{body} {currency}".strip()
+
+
+def fx_symbol(currency):
+    """Yahoo symbol for currency -> ILS, e.g. 'USDILS=X'. None for ILS."""
+    if not currency or currency == HOME_CURRENCY:
+        return None
+    return f"{currency}{HOME_CURRENCY}=X"
+
+
+# --- holdings lists (the computed view; also the old browser format) -------
+
+def _norm(symbol):
+    return (symbol or "").strip().upper()
+
+
+def parse(raw):
+    """Holdings from stored JSON (or a list). Bad / partial data -> skipped."""
+    try:
+        data = json.loads(raw) if isinstance(raw, str) else raw
+    except (TypeError, ValueError):
+        return []
+    out = []
+    for h in data or []:
+        try:
+            sym, qty, cost = _norm(h["symbol"]), float(h["qty"]), float(h["cost"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        if sym and _num(qty) and _num(cost) and qty > 0 and cost >= 0:
+            out.append({"symbol": sym, "qty": qty, "cost": cost})
+    return out
+
+
+def dumps(holdings):
+    return json.dumps(holdings, ensure_ascii=False)
+
+
+def find(holdings, symbol):
+    sym = _norm(symbol)
+    return next((h for h in holdings if h["symbol"] == sym), None)
+
+
+def upsert(holdings, symbol, qty, cost):
+    """Set a holding's quantity and average cost (new list). qty <= 0 removes."""
+    sym = _norm(symbol)
+    rest = [h for h in holdings if h["symbol"] != sym]
+    if not sym or not _num(qty) or qty <= 0:
+        return rest
+    if not _num(cost) or cost < 0:
+        raise ValueError("cost must be a number >= 0")
+    old = find(holdings, sym)
+    new = {"symbol": sym, "qty": float(qty), "cost": float(cost)}
+    if old is None:
+        return rest + [new]
+    return [new if h["symbol"] == sym else h for h in holdings]  # keep order
+
+
+def remove(holdings, symbol):
+    sym = _norm(symbol)
+    return [h for h in holdings if h["symbol"] != sym]
+
+
+# --- valuation --------------------------------------------------------------
+
+def position(holding, price_major, currency, change_pct=None, fx_to_home=None):
+    """
+    One row of the portfolio. price_major is the current price in the major
+    unit (see to_major). fx_to_home converts `currency` to ₪ (None = unknown;
+    1.0 for ILS). Values that can't be computed are None.
+    """
+    qty, cost = holding["qty"], holding["cost"]
+    row = {"symbol": holding["symbol"], "qty": qty, "cost": cost,
+           "currency": currency, "price": price_major if _num(price_major) else None,
+           "value": None, "pnl": None, "pnl_pct": None, "day": None,
+           "value_home": None, "cost_home": None, "day_home": None}
+    if not _num(price_major):
+        return row
+    value = qty * price_major
+    basis = qty * cost
+    row["value"] = value
+    row["pnl"] = value - basis
+    row["pnl_pct"] = (value / basis - 1) * 100 if basis > 0 else None
+    if _num(change_pct) and change_pct > -100:
+        prev = value / (1 + change_pct / 100)
+        row["day"] = value - prev
+    rate = 1.0 if currency == HOME_CURRENCY else fx_to_home
+    if _num(rate):
+        row["value_home"] = value * rate
+        row["cost_home"] = basis * rate      # cost at TODAY's rate (no FX history yet)
+        row["day_home"] = row["day"] * rate if row["day"] is not None else None
+    return row
+
+
+def summarize(rows):
+    """Totals in ₪ over the rows that have a ₪ value. Returns a dict."""
+    priced = [r for r in rows if r["value_home"] is not None]
+    value = sum(r["value_home"] for r in priced)
+    cost = sum(r["cost_home"] for r in priced)
+    day_rows = [r for r in priced if r["day_home"] is not None]
+    day = sum(r["day_home"] for r in day_rows)
+    prev = value - day
+    return {
+        "value": value if priced else None,
+        "cost": cost if priced else None,
+        "pnl": (value - cost) if priced else None,
+        "pnl_pct": ((value / cost - 1) * 100) if (priced and cost > 0) else None,
+        "day": day if day_rows else None,
+        "day_pct": (day / prev * 100) if (day_rows and prev > 0) else None,
+        "missing": [r["symbol"] for r in rows if r["value_home"] is None],
+        "count": len(rows),
+    }
+
+
+# --- trades (what's stored) -------------------------------------------------
 
 STORE_PATH = "data/portfolio.json"
 TAX_RATE = 0.25
@@ -40,24 +193,6 @@ class PortfolioError(ValueError):
 def empty():
     return {"version": 1, "transactions": []}
 
-
-def normalize_price(price, currency):
-    """(price, currency) in a unit people use: agorot (ILA) -> shekels (ILS)."""
-    if price is None:
-        return None, currency
-    cur = (currency or "").upper()
-    if cur == "ILA":
-        return price / 100.0, "ILS"
-    return price, cur
-
-
-def currency_symbol(currency):
-    return {"ILS": "₪", "USD": "$", "EUR": "€", "GBP": "£"}.get((currency or "").upper(), "")
-
-
-# ---------------------------------------------------------------------------
-# Editing
-# ---------------------------------------------------------------------------
 
 def _parse_date(value):
     if isinstance(value, date):
@@ -108,10 +243,6 @@ def remove_transaction(data, tx_id):
     compute(new)
     return new
 
-
-# ---------------------------------------------------------------------------
-# Results
-# ---------------------------------------------------------------------------
 
 @dataclass
 class Holding:
@@ -181,6 +312,39 @@ def compute(data):
     return Result({s: h for s, h in book.items() if h.qty > 0}, realized)
 
 
+def as_holdings(result):
+    """The computed holdings as the simple list position()/summarize() take,
+    in the order the stocks were first bought."""
+    return [{"symbol": h.symbol, "qty": h.qty, "cost": h.avg_cost}
+            for h in result.holdings.values()]
+
+
+def currency_of(data, symbol):
+    """The currency the stock's trades were entered in ('' if none)."""
+    sym = _norm(symbol)
+    return next((t.get("currency", "") for t in data.get("transactions", [])
+                 if t.get("symbol") == sym), "")
+
+
+def from_holdings(data, holdings, currencies, when=None):
+    """One-time move of the old browser portfolio (qty + average cost, no
+    dates) into trades: one opening 'buy' per stock, dated `when` (today).
+    Stocks that already have trades are left alone. Returns new data."""
+    when = (when or date.today()).isoformat()
+    have = {t["symbol"] for t in data.get("transactions", [])}
+    txs = list(data.get("transactions", []))
+    for h in holdings:
+        if h["symbol"] in have or h["qty"] <= 0 or h["cost"] <= 0:
+            continue
+        txs.append({"id": uuid.uuid4().hex[:10], "symbol": h["symbol"], "side": "buy",
+                    "qty": float(h["qty"]), "price": float(h["cost"]),
+                    "currency": (currencies.get(h["symbol"]) or "").upper(),
+                    "date": when, "note": "opening"})
+    new = {"version": 1, "transactions": txs}
+    compute(new)
+    return new
+
+
 def last_year(transactions, today=None):
     """Trades from the last 365 days, newest first."""
     today = today or date.today()
@@ -203,51 +367,7 @@ def tax_estimate(profit):
     return max(0.0, profit) * TAX_RATE
 
 
-def value_positions(result, prices, fx_to_ils=None):
-    """
-    Price each holding. `prices` maps symbol -> (price, currency, change_pct)
-    straight from the quote (ILA is converted here). `fx_to_ils` maps a
-    currency to its shekel rate (e.g. {"USD": 3.72}); when a rate is missing
-    the position is still listed but left out of the shekel total.
-
-    Returns (rows, totals). Each row: symbol, qty, price, currency, value,
-    cost, pl, pl_pct, day_pct, value_ils. Totals: value_ils, cost_ils,
-    pl_ils, day_ils, missing (symbols left out of the totals).
-    """
-    fx = {"ILS": 1.0}
-    fx.update(fx_to_ils or {})
-    rows, missing = [], []
-    totals = {"value_ils": 0.0, "cost_ils": 0.0, "pl_ils": 0.0, "day_ils": 0.0}
-    for sym, h in sorted(result.holdings.items()):
-        raw = prices.get(sym)
-        price, cur, day = (None, h.currency, None)
-        if raw:
-            price, cur = normalize_price(raw[0], raw[1])
-            day = raw[2] if len(raw) > 2 else None
-        value = h.qty * price if price is not None else None
-        cost = h.cost_basis
-        pl = value - cost if value is not None else None
-        rate = fx.get((cur or h.currency or "").upper())
-        value_ils = value * rate if (value is not None and rate) else None
-        rows.append({"symbol": sym, "qty": h.qty, "price": price, "currency": cur or h.currency,
-                     "avg_cost": h.avg_cost, "value": value, "cost": cost, "pl": pl,
-                     "pl_pct": (pl / cost * 100) if (pl is not None and cost) else None,
-                     "day_pct": day, "value_ils": value_ils})
-        if value_ils is None:
-            missing.append(sym)
-            continue
-        totals["value_ils"] += value_ils
-        totals["cost_ils"] += cost * rate
-        totals["pl_ils"] += pl * rate
-        if day is not None:
-            totals["day_ils"] += value_ils - value_ils / (1 + day / 100)
-    totals["missing"] = missing
-    return rows, totals
-
-
-# ---------------------------------------------------------------------------
-# Backup / restore (one JSON file the user keeps)
-# ---------------------------------------------------------------------------
+# --- backup / restore (one JSON file the user keeps) ------------------------
 
 BACKUP_KIND = "stock-app-backup"
 
@@ -270,6 +390,8 @@ def _clean_tx(t):
               "qty": float(t["qty"]), "price": float(t["price"]),
               "currency": str(t.get("currency") or "").upper(),
               "date": _parse_date(t["date"]).isoformat()}
+        if t.get("note"):
+            tx["note"] = str(t["note"])
     except (KeyError, TypeError, ValueError, AttributeError):
         raise PortfolioError("בקובץ יש עסקה חסרה או לא תקינה.") from None
     if not tx["symbol"] or tx["side"] not in SIDES or tx["qty"] <= 0 or tx["price"] <= 0:

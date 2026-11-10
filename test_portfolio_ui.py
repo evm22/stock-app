@@ -63,7 +63,7 @@ class TestPortfolioUI(unittest.TestCase):
 
     def test_empty_home(self):
         at = self.app()
-        self.assertIn("התיק ריק", texts(at))
+        self.assertIn("עוד אין מניות בתיק", texts(at))
 
     def test_buy_shows_on_home_and_is_saved(self):
         at = self.app()
@@ -76,7 +76,7 @@ class TestPortfolioUI(unittest.TestCase):
         at.button(key="back_home").click().run()
         page = texts(at)
         self.assertIn("שווי התיק", page)
-        self.assertIn("NVDA", page)
+        self.assertIn("NVIDIA Corporation", page)
         # 10 x $182.40 x 3.72 = ₪6,785
         self.assertIn("₪6,785", page)
 
@@ -105,6 +105,21 @@ class TestPortfolioUI(unittest.TestCase):
         page = texts(at)
         self.assertIn("+$200.00", page)   # (250-200) x 4
         self.assertIn("$50.00", page)     # 25% of it
+
+    def test_old_browser_portfolio_is_moved_once(self):
+        at = AppTest.from_file(DEMO, default_timeout=60)
+        at.session_state["_test_browser_portfolio"] = (
+            '[{"symbol": "TEVA.TA", "qty": 10, "cost": 60}]')
+        at.run()
+        self.assertFalse(at.exception, at.exception)
+        tx = self.saved()["transactions"]
+        self.assertEqual((tx[0]["symbol"], tx[0]["qty"], tx[0]["price"], tx[0]["currency"],
+                          tx[0]["note"]), ("TEVA.TA", 10.0, 60.0, "ILS", "opening"))
+        page = texts(at) + "\n".join(s.value for s in at.success)
+        self.assertIn("העברתי 1 מניות", page)
+        self.assertIn("₪689", page)  # 10 x ₪68.90
+        at.run()                      # a second run doesn't add it again
+        self.assertEqual(len(self.saved()["transactions"]), 1)
 
 
 if __name__ == "__main__":

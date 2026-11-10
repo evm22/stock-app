@@ -53,7 +53,7 @@ Separate from the app, a two-step screener scores the whole universe
 (~611 tickers: S&P 500 + Israeli stocks + themes, see `universe.py`):
 
 ```bash
-python scan.py             # scores every ticker -> screen_results.json (~30 min)
+python scan.py             # scores every ticker -> local_data/data/screen_results.json (~35 min)
 python scan.py --resume    # continue an interrupted scan from its checkpoint
 python rank.py             # top 25 opportunities, 1-year horizon
 python rank.py --horizon 5y --theme ai --max-beta 1.5 --top 10
@@ -70,13 +70,30 @@ The daily run that does all of this automatically is described under
 ## Look & feel (redesign, mockup "המניות שלי – הדמיה")
 
 Dark theme + Hebrew right-to-left, iPhone-first. The home screen "המניות שלי"
-has the search box and the watchlist (and, from Stage 3, the portfolio). A
+has the search box, **my portfolio** (total in ₪, today, profit/loss; one
+row per stock) and the watchlist. A
 stock opens as one scroll: header, green/red chart, the "bottom line" card,
 Wall Street, 6 key numbers, then collapsed sections (AI, all data,
 technicals, holders). Missing values show "—"; the Debug panel appears only
-with `?debug=1`. Colors live in `.streamlit/config.toml`, the layout CSS at
+with `?debug=1`. Tel-Aviv prices show in ₪ (Yahoo quotes them in agorot).
+On a stock page, "רישום קנייה / מכירה" logs a trade (buy/sell, shares,
+price, date). `portfolio.py` works out the holdings (average cost), realized
+profit and a rough 25% tax estimate, and converts foreign stocks to ₪ at
+today's rate. The trades are saved in `data/portfolio.json` through
+`data_store.py` (the `local_data/` folder until the private data repo is
+connected; on Streamlit Cloud that folder is temporary, so the home screen
+offers a backup file). A portfolio saved by the older browser-only version is
+moved into trades automatically, once. The watchlist is still saved in the
+browser on that device. Colors live in `.streamlit/config.toml`, the layout CSS at
 the top of `app.py`. Some engine texts (signal names, tooltips) are still
 English.
+
+To work on the look without internet, `dev/demo_app.py` runs the real
+`app.py` on made-up sample data (AAPL, NVDA, TEVA.TA):
+
+```bash
+streamlit run dev/demo_app.py
+```
 
 ## Run it locally
 
@@ -109,6 +126,8 @@ venv\Scripts\python test_app.py      # chart builder, no network (fast)
 venv\Scripts\python test_scan.py     # screener rows, no network
 venv\Scripts\python test_data_store.py  # data store (local + mocked GitHub)
 venv\Scripts\python test_daily_job.py   # daily run: guard, history, ranking, Telegram (mocked)
+venv\Scripts\python test_portfolio.py    # portfolio math: trades, P/L, tax, backup (offline)
+venv\Scripts\python test_portfolio_ui.py # portfolio screens on sample data (AppTest, offline)
 venv\Scripts\python test_rank.py     # screener ranking + resume, no network
 ```
 
@@ -161,15 +180,3 @@ The GitHub Actions workflow that runs it every morning is kept as a template in
 `deploy/stock-app-data/`. It is meant for the private data repo and is **not**
 active in this public repo (GitHub only runs workflows under `.github/`).
 `keep_awake.py` (used by that workflow) visits the live app so it isn't asleep.
-
-## Working on the look offline
-
-`dev/demo_app.py` runs the real `app.py` with made-up sample data (AAPL, NVDA,
-TEVA.TA), so you can see and screenshot the UI without internet access:
-
-```bash
-streamlit run dev/demo_app.py
-```
-
-The colors live in `.streamlit/config.toml` (committed); the Hebrew
-right-to-left layout and the small cards are CSS at the top of `app.py`.

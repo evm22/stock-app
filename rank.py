@@ -1,7 +1,8 @@
 """
 rank.py -- Stage 2b: rank and filter the screener's scan results.
 
-Reads screen_results.json (written by scan.py) and turns it into a ranked
+Reads local_data/data/screen_results.json (written by scan.py / the daily
+job) and turns it into a ranked
 "top opportunities" list.  Pure Python, no network, no Streamlit -- so the
 app (Stage 3) can import rank_rows() directly.
 
@@ -31,7 +32,11 @@ It only re-weights CURRENT data.  It is not a prediction, and not advice.
 
 import argparse
 import json
+import os
 import sys
+
+DEFAULT_RESULTS = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                               "local_data", "data", "screen_results.json")
 
 # --- Tunable knobs ---------------------------------------------------------
 
@@ -169,7 +174,7 @@ def rank_rows(rows: list, horizon: str = "1y", theme=None, region=None,
     return out[:top] if top else out
 
 
-def load_results(path: str = "screen_results.json") -> dict:
+def load_results(path: str = DEFAULT_RESULTS) -> dict:
     with open(path, encoding="utf-8") as fh:
         return json.load(fh)
 
@@ -193,7 +198,7 @@ def print_table(ranked: list) -> None:
 
 def main():
     p = argparse.ArgumentParser(description="Rank screener scan results")
-    p.add_argument("--in", dest="inp", default="screen_results.json")
+    p.add_argument("--in", dest="inp", default=DEFAULT_RESULTS)
     p.add_argument("--horizon", choices=HORIZONS, default="1y")
     p.add_argument("--top", type=int, default=25)
     p.add_argument("--theme")

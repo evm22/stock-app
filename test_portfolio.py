@@ -1,6 +1,9 @@
 """
-test_portfolio.py -- offline tests for portfolio.py (trades, holdings, P/L,
-tax estimate, backup/restore).
+test_portfolio.py -- offline tests for portfolio.py (no network, no Streamlit):
+units and money, holdings and valuation, trades, average cost, realized
+profit, tax estimate, the move from the old browser portfolio, backup.
+
+The screens are tested in test_portfolio_ui.py.
 
 Run:  python test_portfolio.py
 """
@@ -13,8 +16,9 @@ from datetime import date, datetime
 
 sys.path.insert(0, os.path.dirname(__file__))
 
-import portfolio as pf
+import portfolio as P
 
+pf = P  # the trade tests below use this name
 TODAY = date(2026, 11, 10)
 
 
@@ -23,6 +27,96 @@ def build(*trades):
     for sym, side, qty, price, when, *cur in trades:
         data = pf.add_transaction(data, sym, side, qty, price, (cur or ["USD"])[0], when, today=TODAY)
     return data
+
+
+class TestUnits(unittest.TestCase):
+    def test_agorot_and_pence_to_major(self):
+        self.assertEqual(P.to_major(13580.0, "ILA"), (135.8, "ILS"))
+        self.assertEqual(P.to_major(250.0, "GBp"), (2.5, "GBP"))
+        self.assertEqual(P.to_major(182.4, "USD"), (182.4, "USD"))
+        self.assertEqual(P.to_major(None, "ILA"), (None, "ILS"))
+
+    def test_money(self):
+        self.assertEqual(P.money(1234.5, "ILS"), "₪1,234.50")
+        self.assertEqual(P.money(-12.0, "USD"), "-$12.00")
+        self.assertEqual(P.money(5.0, "CHF"), "5.00 CHF")
+        self.assertEqual(P.money(None, "USD"), "—")
+        self.assertEqual(P.money(1234.5, "ILS", 0), "₪1,234")
+
+    def test_fx_symbol(self):
+        self.assertEqual(P.fx_symbol("USD"), "USDILS=X")
+        self.assertIsNone(P.fx_symbol("ILS"))
+
+
+class TestEditing(unittest.TestCase):
+    def test_parse_skips_bad_rows(self):
+        raw = ('[{"symbol":"nvda","qty":20,"cost":118},{"symbol":"X"},'
+               '{"symbol":"Y","qty":-1,"cost":5},{"symbol":"Z","qty":"a","cost":1}]')
+        self.assertEqual(P.parse(raw), [{"symbol": "NVDA", "qty": 20.0, "cost": 118.0}])
+        self.assertEqual(P.parse("not json"), [])
+        self.assertEqual(P.parse(None), [])
+
+    def test_upsert_add_update_remove(self):
+        h = P.upsert([], "nvda", 20, 118)
+        h = P.upsert(h, "TEVA.TA", 300, 52.4)
+        self.assertEqual([x["symbol"] for x in h], ["NVDA", "TEVA.TA"])
+        h = P.upsert(h, "NVDA", 25, 120)           # update keeps order
+        self.assertEqual(h[0], {"symbol": "NVDA", "qty": 25.0, "cost": 120.0})
+        self.assertEqual(len(h), 2)
+        h = P.upsert(h, "NVDA", 0, 120)            # qty 0 removes
+        self.assertEqual([x["symbol"] for x in h], ["TEVA.TA"])
+        self.assertEqual(P.remove(h, "teva.ta"), [])
+        with self.assertRaises(ValueError):
+            P.upsert([], "A", 1, -5)
+
+    def test_round_trip(self):
+        h = P.upsert([], "AAPL", 3, 201.5)
+        self.assertEqual(P.parse(P.dumps(h)), h)
+
+
+class TestValuation(unittest.TestCase):
+    def test_position_usd_with_fx(self):
+        row = P.position({"symbol": "NVDA", "qty": 20, "cost": 100.0},
+                         150.0, "USD", change_pct=2.0, fx_to_home=3.7)
+        self.assertAlmostEqual(row["value"], 3000.0)
+        self.assertAlmostEqual(row["pnl"], 1000.0)
+        self.assertAlmostEqual(row["pnl_pct"], 50.0)
+        self.assertAlmostEqual(row["value_home"], 11100.0)
+        self.assertAlmostEqual(row["day"], 3000.0 - 3000.0 / 1.02)
+
+    def test_position_ils_needs_no_fx(self):
+        row = P.position({"symbol": "TEVA.TA", "qty": 300, "cost": 52.4},
+                         135.8, "ILS")
+        self.assertAlmostEqual(row["value_home"], 300 * 135.8)
+
+    def test_missing_price_or_fx(self):
+        no_price = P.position({"symbol": "A", "qty": 1, "cost": 1}, None, "USD", fx_to_home=3.7)
+        self.assertIsNone(no_price["value"])
+        no_fx = P.position({"symbol": "B", "qty": 1, "cost": 1}, 10.0, "USD")
+        self.assertEqual(no_fx["value"], 10.0)
+        self.assertIsNone(no_fx["value_home"])
+
+    def test_summarize(self):
+        rows = [
+            P.position({"symbol": "NVDA", "qty": 10, "cost": 100.0}, 150.0, "USD",
+                       change_pct=0.0, fx_to_home=4.0),          # 6000 ₪, cost 4000
+            P.position({"symbol": "TEVA.TA", "qty": 100, "cost": 50.0}, 40.0, "ILS",
+                       change_pct=0.0),                          # 4000 ₪, cost 5000
+            P.position({"symbol": "GONE", "qty": 1, "cost": 1.0}, None, "USD"),
+        ]
+        t = P.summarize(rows)
+        self.assertAlmostEqual(t["value"], 10000.0)
+        self.assertAlmostEqual(t["cost"], 9000.0)
+        self.assertAlmostEqual(t["pnl"], 1000.0)
+        self.assertAlmostEqual(t["pnl_pct"], 100 * (10000 / 9000 - 1))
+        self.assertAlmostEqual(t["day"], 0.0)
+        self.assertEqual(t["missing"], ["GONE"])
+        self.assertEqual(t["count"], 3)
+
+    def test_summarize_empty(self):
+        t = P.summarize([])
+        self.assertIsNone(t["value"])
+        self.assertEqual(t["count"], 0)
 
 
 class TestAdd(unittest.TestCase):
@@ -123,34 +217,33 @@ class TestYearAndTax(unittest.TestCase):
         self.assertEqual(pf.tax_estimate(-500), 0)
 
 
-class TestPricesAndValue(unittest.TestCase):
-    def test_agorot_become_shekels(self):
-        self.assertEqual(pf.normalize_price(6890, "ILA"), (68.9, "ILS"))
-        self.assertEqual(pf.normalize_price(100, "usd"), (100, "USD"))
-        self.assertEqual(pf.normalize_price(None, "ILA"), (None, "ILA"))
+class TestHoldingsFromTrades(unittest.TestCase):
+    def test_as_holdings_feeds_position(self):
+        data = build(("NVDA", "buy", 10, 100, "2026-01-05"), ("NVDA", "buy", 10, 200, "2026-02-05"),
+                     ("AAPL", "buy", 1, 50, "2026-03-01"), ("AAPL", "sell", 1, 60, "2026-04-01"))
+        hs = pf.as_holdings(pf.compute(data))
+        self.assertEqual(hs, [{"symbol": "NVDA", "qty": 20.0, "cost": 150.0}])
+        row = pf.position(hs[0], 180.0, "USD", None, 3.7)
+        self.assertAlmostEqual(row["pnl"], 600)
 
-    def test_value_positions(self):
-        data = build(("NVDA", "buy", 10, 100, "2026-01-05"),
-                     ("TEVA.TA", "buy", 100, 60, "2026-01-05", "ILS"))
-        res = pf.compute(data)
-        prices = {"NVDA": (110.0, "USD", 10.0), "TEVA.TA": (6900.0, "ILA", 0.0)}
-        rows, tot = pf.value_positions(res, prices, {"USD": 3.7})
-        by = {r["symbol"]: r for r in rows}
-        self.assertAlmostEqual(by["NVDA"]["value"], 1100)
-        self.assertAlmostEqual(by["NVDA"]["pl_pct"], 10)
-        self.assertAlmostEqual(by["TEVA.TA"]["price"], 69.0)
-        self.assertEqual(by["TEVA.TA"]["currency"], "ILS")
-        self.assertAlmostEqual(tot["value_ils"], 1100 * 3.7 + 6900)
-        self.assertAlmostEqual(tot["cost_ils"], 1000 * 3.7 + 6000)
-        self.assertAlmostEqual(tot["day_ils"], (1100 - 1000) * 3.7)
-        self.assertEqual(tot["missing"], [])
+    def test_currency_of(self):
+        data = build(("TEVA.TA", "buy", 1, 60, "2026-01-05", "ILS"))
+        self.assertEqual(pf.currency_of(data, "teva.ta"), "ILS")
+        self.assertEqual(pf.currency_of(data, "X"), "")
 
-    def test_missing_rate_or_price_left_out_of_total(self):
-        data = build(("NVDA", "buy", 10, 100, "2026-01-05"), ("Q", "buy", 1, 5, "2026-01-05"))
-        rows, tot = pf.value_positions(pf.compute(data), {"NVDA": (110.0, "USD", None)}, {})
-        self.assertEqual(sorted(tot["missing"]), ["NVDA", "Q"])
-        self.assertEqual(tot["value_ils"], 0)
-        self.assertEqual(len(rows), 2)
+    def test_from_old_browser_holdings(self):
+        old = [{"symbol": "NVDA", "qty": 20.0, "cost": 118.0},
+               {"symbol": "TEVA.TA", "qty": 300.0, "cost": 52.4},
+               {"symbol": "FREE", "qty": 5.0, "cost": 0.0}]   # cost 0: can't be a buy
+        data = build(("NVDA", "buy", 1, 100, "2026-01-05"))  # already has trades: left alone
+        new = pf.from_holdings(data, old, {"TEVA.TA": "ILS", "NVDA": "USD"}, when=TODAY)
+        added = new["transactions"][1:]
+        self.assertEqual(len(added), 1)
+        self.assertEqual((added[0]["symbol"], added[0]["qty"], added[0]["price"],
+                          added[0]["currency"], added[0]["date"], added[0]["note"]),
+                         ("TEVA.TA", 300.0, 52.4, "ILS", "2026-11-10", "opening"))
+        hs = {h["symbol"]: h for h in pf.as_holdings(pf.compute(new))}
+        self.assertAlmostEqual(hs["TEVA.TA"]["cost"], 52.4)
 
 
 class TestBackup(unittest.TestCase):
@@ -176,4 +269,6 @@ class TestBackup(unittest.TestCase):
 
 
 if __name__ == "__main__":
-    unittest.main()
+    result = unittest.TextTestRunner(verbosity=2).run(
+        unittest.TestLoader().loadTestsFromModule(sys.modules[__name__]))
+    sys.exit(0 if result.wasSuccessful() else 1)
