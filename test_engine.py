@@ -413,8 +413,8 @@ def expect_app_renders_without_gemini():
         return bool(getattr(getattr(b, "proto", None), "disabled", False))
 
     buttons = at.button
-    quick = [b for b in buttons if "Quick take" in label_of(b)]
-    deep = [b for b in buttons if "Deep dive" in label_of(b)]
+    quick = [b for b in buttons if "הסבר קצר" in label_of(b)]
+    deep = [b for b in buttons if "ניתוח מעמיק" in label_of(b)]
     assert quick, "the 'Quick take' button should render"
     assert deep, "the 'Deep dive' button should render"
     # No key -> both AI buttons must be disabled.
@@ -422,18 +422,18 @@ def expect_app_renders_without_gemini():
     assert disabled_of(deep[0]), "Deep dive must be disabled without a key"
     # Nothing was clicked -> the AI summary box / caption must be ABSENT.
     captions = [getattr(c, "value", "") for c in at.caption]
-    assert not any("AI-generated summary" in c for c in captions), \
+    assert not any("סיכום שנכתב על ידי AI" in c for c in captions), \
         "no AI box should appear before a click"
-    assert not any("AI analysis unavailable" in c for c in captions), \
+    assert not any("ניתוח ה-AI לא זמין" in c for c in captions), \
         "the unavailable note must only appear after a click"
 
-    # New tabbed layout: the verdict + key sections render (as expanders).
+    # One-scroll layout: the verdict breakdown + key sections render (as expanders).
     exp_labels = [getattr(e, "label", None)
                   or getattr(getattr(e, "proto", None), "label", "")
                   for e in at.expander]
-    assert "Verdict" in exp_labels, "the Verdict section should render"
-    assert "Company analysis" in exp_labels, "Fundamentals should render"
-    assert "Notable institutional holders" in exp_labels, "Ownership should render"
+    assert "למה? איך חושב הציון" in exp_labels, "the Verdict section should render"
+    assert "כל נתוני החברה" in exp_labels, "Fundamentals should render"
+    assert "מוסדיים גדולים" in exp_labels, "Ownership should render"
     print(f"      app key=None: Quick+Deep buttons present & disabled, no AI "
           f"box; verdict+fundamentals+ownership render ({len(buttons)} buttons)")
 
@@ -458,14 +458,14 @@ def expect_app_holders_no_data():
         if len(at.selectbox) >= 1:
             at.selectbox[0].set_value("AAPL").run()
         assert not at.exception, f"app raised with empty holders: {at.exception}"
-        # The holders section is now an st.expander inside the Ownership tab.
+        # The holders section is a collapsed st.expander on the stock page.
         exp_labels = [getattr(e, "label", None)
                       or getattr(getattr(e, "proto", None), "label", "")
                       for e in at.expander]
-        assert "Notable institutional holders" in exp_labels, \
+        assert "מוסדיים גדולים" in exp_labels, \
             "the holders section (expander) should render"
         caps = [getattr(c, "value", "") for c in at.caption]
-        assert any("No institutional holder data" in c for c in caps), \
+        assert any("אין נתוני מחזיקים מוסדיים" in c for c in caps), \
             "the muted no-data line should show when holders are empty"
         print("      holders: 'no data' line renders when empty; no exception")
     finally:
@@ -504,12 +504,12 @@ def expect_app_famous_no_fetch_on_load():
         exp_labels = [getattr(e, "label", None)
                       or getattr(getattr(e, "proto", None), "label", "")
                       for e in at.expander]
-        assert "Famous investors holding this" in exp_labels, \
+        assert "משקיעים מפורסמים" in exp_labels, \
             "the famous-investors expander should render"
         btn_labels = [getattr(b, "label", None)
                       or getattr(getattr(b, "proto", None), "label", "")
                       for b in at.button]
-        assert any("Check famous investors" in (b or "") for b in btn_labels), \
+        assert any("בדוק משקיעים מפורסמים" in (b or "") for b in btn_labels), \
             "the 'Check famous investors' button should render"
         assert called["n"] == 0, \
             "must NOT fetch EDGAR on page load — only on a button click"

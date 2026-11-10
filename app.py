@@ -10,8 +10,8 @@ Run locally with:
     streamlit run app.py
 """
 
-import hmac
 import html
+import hmac
 import json
 import os
 
@@ -24,7 +24,91 @@ import gemini_helper  # OPTIONAL Gemini explanation layer (no-op without a key)
 import famous_investors  # famous-investor 13F holdings from SEC EDGAR (no key)
 
 # Basic page configuration (title shown in the browser tab, etc.).
-st.set_page_config(page_title="המניות שלי", page_icon="📈")
+st.set_page_config(page_title="המניות שלי", page_icon="📈",
+                   initial_sidebar_state="collapsed")
+
+# --- Look & feel (PURE STYLING) -------------------------------------------
+# The colors live in .streamlit/config.toml (dark theme). This CSS adds what
+# the theme can't: Hebrew right-to-left text, the Rubik/Assistant fonts,
+# compact metric tiles, and a few small "cards" (header, verdict) drawn as HTML.
+# Charts and tables stay left-to-right so their axes read normally.
+APP_CSS = """
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Rubik:wght@400;500;600;700&family=Assistant:wght@400;600;700&display=swap');
+:root {
+  --sa-surface: #151D2B; --sa-surface2: #1D2737; --sa-line: #283347;
+  --sa-fg: #E7ECF4; --sa-muted: #8B97AA; --sa-accent: #8EA2FF;
+  --sa-up: #3CC98A; --sa-down: #FF6B6B; --sa-hold: #F2B04C;
+}
+.stApp, .stApp p, .stApp label, .stApp input, .stApp button, .stApp li { font-family: "Assistant", "Rubik", system-ui, sans-serif; }
+/* Keep Streamlit's icon font (expander arrows etc.) untouched. */
+[data-testid="stIconMaterial"], .material-symbols-rounded { font-family: "Material Symbols Rounded" !important; }
+h1, h2, h3, h4 { font-family: "Rubik", "Assistant", system-ui, sans-serif !important; letter-spacing: -0.01em; }
+.block-container { padding-top: 2.2rem; padding-bottom: 4rem; max-width: 760px; }
+
+/* Hebrew: right-to-left for the page text and widgets... */
+[data-testid="stMainBlockContainer"] { direction: rtl; text-align: right; }
+[data-testid="stMarkdownContainer"] { text-align: right; }
+[data-testid="stExpander"] summary { flex-direction: row; }
+/* ...but charts, tables and numbers inside inputs stay left-to-right. */
+[data-testid="stVegaLiteChart"], [data-testid="stArrowVegaLiteChart"],
+[data-testid="stDataFrame"], [data-testid="stTable"], .vega-embed { direction: ltr; text-align: left; }
+/* Range buttons (1D ... 5Y) read left-to-right like on every chart app. */
+[data-testid="stButtonGroup"] { direction: ltr; }
+.sa-num { direction: ltr; unicode-bidi: isolate; display: inline-block; font-variant-numeric: tabular-nums; }
+
+/* No hover link icons next to headings. */
+[data-testid="stHeaderActionElements"] { display: none; }
+/* We don't use the sidebar any more: hide its open/close arrow. */
+[data-testid="stSidebarCollapsedControl"], [data-testid="collapsedControl"] { display: none; }
+
+/* Compact metric tiles (smaller value text, tighter spacing). */
+[data-testid="stMetricValue"] { font-size: 1.2rem; line-height: 1.3; font-variant-numeric: tabular-nums; }
+/* Numbers read left-to-right so "-1.90%" keeps its minus in front. */
+[data-testid="stMetricValue"] > div { direction: ltr; unicode-bidi: isolate; text-align: right; }
+[data-testid="stMetricLabel"], [data-testid="stMetricLabel"] p { font-size: 0.85rem; }
+[data-testid="stMetric"] { padding: 0.15rem 0; }
+
+/* Key-metric grid: keep 2 tiles per row even on a phone (Streamlit would
+   otherwise stack every column on its own line). */
+.st-key-kpis [data-testid="stHorizontalBlock"] { flex-wrap: nowrap !important; gap: 0.5rem; }
+.st-key-kpis [data-testid="stColumn"] { min-width: 0 !important; width: 50% !important; flex: 1 1 0 !important;
+  background: var(--sa-surface2); border-radius: 14px; padding: 0.45rem 0.7rem; }
+
+/* Watchlist rows on the home screen: full-width buttons that read as list rows. */
+.st-key-watchlist button { justify-content: flex-start; text-align: right; border-radius: 14px;
+  background: var(--sa-surface); border: 1px solid var(--sa-line); padding: 0.7rem 0.9rem; }
+.st-key-watchlist button p { font-size: 1rem; }
+
+/* Small HTML cards. */
+.sa-card { background: var(--sa-surface); border: 1px solid var(--sa-line); border-radius: 20px;
+  padding: 1rem 1.1rem; margin: 0.4rem 0 0.8rem; }
+.sa-eyebrow { color: var(--sa-muted); font-size: 0.82rem; }
+.sa-name { font-family: Rubik, sans-serif; font-weight: 700; font-size: 1.55rem; line-height: 1.2; }
+.sa-sub { color: var(--sa-muted); font-size: 0.85rem; }
+.sa-price { font-family: Rubik, sans-serif; font-weight: 600; font-size: 2.1rem; line-height: 1.15; }
+.sa-row { display: flex; gap: 0.6rem; align-items: baseline; flex-wrap: wrap; }
+.sa-chip { display: inline-block; font-weight: 700; font-size: 0.85rem; padding: 0.12rem 0.6rem;
+  border-radius: 999px; font-variant-numeric: tabular-nums; direction: ltr; unicode-bidi: isolate; }
+.sa-up { color: var(--sa-up); background: rgba(60,201,138,.14); }
+.sa-down { color: var(--sa-down); background: rgba(255,107,107,.14); }
+.sa-hold { color: var(--sa-hold); background: rgba(242,176,76,.15); }
+.sa-flat { color: var(--sa-muted); background: var(--sa-surface2); }
+.sa-verdict { display: flex; justify-content: space-between; align-items: flex-start; gap: 0.8rem; }
+.sa-word { font-family: Rubik, sans-serif; font-weight: 700; font-size: 1.9rem; line-height: 1.1; }
+.sa-score { text-align: center; min-width: 4.5rem; }
+.sa-score b { font-size: 1.3rem; font-variant-numeric: tabular-nums; }
+.sa-bar { height: 6px; border-radius: 99px; background: var(--sa-surface2); margin-top: 0.3rem; overflow: hidden; }
+.sa-bar i { display: block; height: 100%; border-radius: 99px; }
+.sa-why { margin: 0.7rem 0 0.6rem; font-size: 0.95rem; }
+.sa-horiz { display: grid; grid-template-columns: repeat(3, 1fr); gap: 0.4rem; }
+.sa-horiz div { background: var(--sa-surface2); border-radius: 12px; padding: 0.45rem; text-align: center; }
+.sa-horiz b { display: block; font-size: 0.95rem; } .sa-horiz span { font-size: 0.75rem; color: var(--sa-muted); }
+.sa-fine { color: var(--sa-muted); font-size: 0.76rem; margin-top: 0.6rem; }
+</style>
+"""
+st.markdown(APP_CSS, unsafe_allow_html=True)
+
 
 
 def _secret(name):
@@ -78,70 +162,6 @@ def require_password():
 
 require_password()
 
-# --- Look & feel (redesign Stage 2: mockup "המניות שלי – הדמיה", items 5-8) ---
-# PURE STYLING. The colors come from .streamlit/config.toml (dark theme); this
-# CSS adds the Hebrew right-to-left layout, the mockup's fonts and rounded
-# "card" surfaces, and keeps numbers / tickers / charts left-to-right.
-# Streamlit's internal markup can change between versions, which is why
-# requirements.txt pins the Streamlit version.
-st.markdown(
-    """
-    <style>
-    @import url('https://fonts.googleapis.com/css2?family=Rubik:wght@400;500;600;700&family=Assistant:wght@400;600;700&display=swap');
-    html, body, .stApp, .stApp p, .stApp li, .stApp label, .stApp input,
-    .stApp button, .stApp textarea {
-        font-family: "Assistant", "Rubik", system-ui, sans-serif;
-    }
-    .stApp h1, .stApp h2, .stApp h3, .stApp h4 {
-        font-family: "Rubik", "Assistant", system-ui, sans-serif;
-        letter-spacing: -0.01em;
-    }
-    /* Right-to-left for the CONTENT only (main column + sidebar contents).
-       Setting it on the outer frame flips Streamlit's own layout and squeezes
-       the sidebar on phones, so the frame itself stays left-to-right. */
-    [data-testid="stMainBlockContainer"], [data-testid="stSidebarContent"],
-    [data-testid="stSidebarUserContent"] { direction: rtl; }
-    .stApp [data-testid="stMarkdownContainer"],
-    .stApp [data-testid="stCaptionContainer"],
-    .stApp [data-testid="stWidgetLabel"] { text-align: right; }
-    .stApp input, .stApp textarea { text-align: right; }
-    /* ...but charts, tables, code and numbers stay left-to-right. */
-    .stApp [data-testid="stVegaLiteChart"], .stApp [data-testid="stArrowVegaLiteChart"],
-    .stApp [data-testid="stDataFrame"], .stApp code,
-    .stApp [data-testid="stMetricValue"] { direction: ltr; unicode-bidi: isolate; }
-    .stApp [data-testid="stMetricValue"] { text-align: right; }
-
-    /* Rounded "card" sections, like the mockup. */
-    .stApp [data-testid="stExpander"] details {
-        border-radius: 16px;
-        background: var(--secondary-background-color, #151D2B);
-    }
-    .stApp [data-testid="stExpander"] summary { font-weight: 700; }
-    .stApp [data-testid="stTabs"] button p { font-weight: 600; }
-    .stApp [data-testid="stTextInput"] input { border-radius: 14px; }
-
-    /* Compact metric tiles on a soft surface. */
-    [data-testid="stMetric"] {
-        background: rgba(255, 255, 255, 0.04);
-        border-radius: 14px;
-        padding: 0.45rem 0.75rem;
-    }
-    [data-testid="stMetricValue"] { font-size: 1.25rem; line-height: 1.3; font-weight: 700; }
-    [data-testid="stMetricLabel"], [data-testid="stMetricLabel"] p { font-size: 0.85rem; }
-
-    /* Big price line in the stock header. */
-    .price-line { font-family: "Rubik", sans-serif; font-size: 2rem; font-weight: 600;
-                  direction: ltr; unicode-bidi: isolate; display: inline-block; }
-    .chip { display: inline-block; font-weight: 700; font-size: 0.9rem;
-            padding: 2px 10px; border-radius: 999px; direction: ltr;
-            unicode-bidi: isolate; margin-inline-start: 8px; vertical-align: middle; }
-    .chip.up { color: #3CC98A; background: rgba(60, 201, 138, .14); }
-    .chip.down { color: #FF6B6B; background: rgba(255, 107, 107, .14); }
-    .ltr { direction: ltr; unicode-bidi: isolate; display: inline-block; }
-    </style>
-    """,
-    unsafe_allow_html=True,
-)
 
 
 # @st.cache_data remembers this function's result for each ticker, so when
@@ -209,22 +229,10 @@ VERDICT_COLORS = {
 
 # Friendly display names for the three verdict horizons.
 HORIZON_NAMES = {
-    "6M": "חצי שנה (טווח קצר)",
-    "1Y": "שנה (טווח בינוני)",
-    "5Y": "5 שנים (טווח ארוך)",
+    "6M": "חצי שנה",
+    "1Y": "שנה",
+    "5Y": "5 שנים",
 }
-
-# Hebrew display text for verdict and analyst labels. The engine keeps the
-# English labels as its internal values; only what we SHOW is translated.
-LABEL_HE = {
-    "Sell": "מכירה", "Hold": "החזקה", "Buy": "קנייה", "Strong Buy": "קנייה חזקה",
-    "Underperform": "תשואת חסר", "Strong Sell": "מכירה חזקה",
-}
-
-
-def he(label):
-    """Hebrew display text for a verdict/analyst label (unknown -> as-is)."""
-    return LABEL_HE.get(label, label) if label else label
 
 # Colour for analyst consensus labels (adds the bearish ones to the scale).
 ANALYST_COLORS = {
@@ -242,16 +250,13 @@ def _abbreviate(number):
     return f"{number:,.0f}"
 
 
-MISSING = "—"  # shown wherever a value is missing (was "n/a")
-
-
 def format_metric(metric, currency):
     """
     Turn a Metric into a display string, using its `fmt` hint. Missing values
     show as a dash ("—"). `currency` (e.g. "USD") is appended to money values.
     """
     if not metric.available:
-        return MISSING
+        return "—"
 
     value = metric.value
     fmt = metric.fmt
@@ -395,13 +400,13 @@ PRESSURE_KEYS = ["avg_volume", "vol_recent", "vol_avg", "vol_move", "vol_confirm
 _STATUS_DOT = {"good": "🟢", "neutral": "🟡", "bad": "🔴"}
 
 # Legend + disclaimer shown once per section that has colored tiles.
-COLOR_LEGEND = ("🟢 חוזקה · 🟡 לשים לב · 🔴 חולשה. כללי אצבע לפי המספרים "
-                "שמוצגים, **לא ייעוץ השקעות**.")
+COLOR_LEGEND = ("🟢 strength · 🟡 watch / mixed · 🔴 weakness — quick rules of "
+                "thumb from the numbers already shown, **not financial advice**.")
 
 
-def render_metrics(group, keys=None, columns_per_row=3, context=None):
+def render_metrics(group, keys=None, columns_per_row=3, context=None, labels=None):
     """
-    Show a MetricGroup as a tidy grid of st.metric tiles (n/a when missing),
+    Show a MetricGroup as a tidy grid of st.metric tiles ("—" when missing),
     each with a plain-language "?" help tooltip. Pass `keys` to render only a
     subset (and in that order), e.g. to split a section into sub-groups.
 
@@ -418,106 +423,15 @@ def render_metrics(group, keys=None, columns_per_row=3, context=None):
         columns = st.columns(columns_per_row)
         for column, (key, metric) in zip(columns, row):
             status = engine.classify_metric(key, metric.value, context)
-            label = metric.label
+            label = (labels or {}).get(key, metric.label)
             help_text = engine.HELP_TEXTS.get(key) or ""
             if status in _STATUS_DOT:
-                label = f"{_STATUS_DOT[status]} {metric.label}"
+                label = f"{_STATUS_DOT[status]} {label}"
                 note = engine.threshold_note(key, context)
                 if note:
                     help_text = f"{help_text}  {note}".strip()
             column.metric(label, format_metric(metric, group.currency),
                           help=help_text or None)
-
-
-# The 6 key metrics shown up front (mockup item 6). The rest live under the
-# "כל הנתונים" / "ניתוח טכני" tabs. (group, engine key, Hebrew label, Hebrew help)
-KEY_METRICS = [
-    ("company", "pe", "מכפיל רווח",
-     "מחיר המניה חלקי הרווח השנתי למניה. גבוה = יקר, או שמצפים לצמיחה."),
-    ("company", "revenue_growth", "צמיחת הכנסות",
-     "בכמה גדלו המכירות לעומת שנה קודם."),
-    ("company", "profit_margin", "שולי רווח",
-     "כמה מכל שקל של מכירות נשאר כרווח נקי."),
-    ("company", "debt_to_equity", "חוב להון",
-     "כמה חוב יש לחברה ביחס להון שלה. נמוך = בטוח יותר."),
-    ("company", "dividend_yield", "תשואת דיבידנד",
-     "כמה דיבידנד משולם בשנה ביחס למחיר המניה."),
-    ("technicals", "beta", "בטא",
-     "כמה המניה זזה ביחס לשוק. 1 = כמו השוק, מעל 1 = תנודתית יותר."),
-]
-
-
-def key_metric_tiles(company, technicals, context=None):
-    """(label, value, help) for the 6 key tiles. Pure: no Streamlit calls.
-    A colored dot is prefixed when the engine has a good/neutral/bad rule;
-    missing data shows MISSING ("—") with no dot."""
-    groups = {"company": company, "technicals": technicals}
-    tiles = []
-    for group_name, key, label, help_text in KEY_METRICS:
-        group = groups[group_name]
-        metric = (group.metrics.get(key)
-                  if (group is not None and group.found and group.metrics) else None)
-        if metric is None or not metric.available:
-            tiles.append((label, MISSING, help_text))
-            continue
-        status = engine.classify_metric(key, metric.value, context)
-        if status in _STATUS_DOT:
-            label = f"{_STATUS_DOT[status]} {label}"
-        tiles.append((label, format_metric(metric, group.currency), help_text))
-    return tiles
-
-
-def render_key_metrics(company, technicals, context=None, columns_per_row=3):
-    tiles = key_metric_tiles(company, technicals, context)
-    for start in range(0, len(tiles), columns_per_row):
-        columns = st.columns(columns_per_row)
-        for column, (label, value, help_text) in zip(columns, tiles[start:start + columns_per_row]):
-            column.metric(label, value, help=help_text)
-
-
-# Colors for "up" / "down" from the mockup's dark palette.
-UP_COLOR = "#3CC98A"
-DOWN_COLOR = "#FF6B6B"
-
-
-def make_line_chart(df, value_col="Close", value_title="מחיר"):
-    """
-    A clean line chart with a soft gradient fill underneath (mockup item 7).
-    Green when the value ended the range at or above where it started, red
-    when it fell. `df` needs a Date column and `value_col`.
-    """
-    values = df[value_col].dropna()
-    rising = len(values) < 2 or float(values.iloc[-1]) >= float(values.iloc[0])
-    color = UP_COLOR if rising else DOWN_COLOR
-    # Fit the axis to the data (an area otherwise fills down to a far-away
-    # "nice" round number and squashes the line against the top).
-    if len(values):
-        low, high = float(values.min()), float(values.max())
-        pad = (high - low) * 0.08 or abs(high) * 0.02 or 1.0
-        y_scale = alt.Scale(zero=False, nice=False, domain=[low - pad, high + pad])
-    else:
-        y_scale = alt.Scale(zero=False)
-    area = (
-        alt.Chart(df)
-        .mark_area(
-            clip=True,
-            line={"color": color, "strokeWidth": 2},
-            color=alt.Gradient(
-                gradient="linear",
-                stops=[alt.GradientStop(color=color + "00", offset=0),
-                       alt.GradientStop(color=color + "55", offset=1)],
-                x1=1, x2=1, y1=1, y2=0,
-            ),
-        )
-        .encode(
-            x=alt.X("Date:T", title=None),
-            y=alt.Y(f"{value_col}:Q", title=value_title, scale=y_scale),
-            tooltip=[alt.Tooltip("Date:T", title="תאריך"),
-                     alt.Tooltip(f"{value_col}:Q", title=value_title, format=",.2f")],
-        )
-        .properties(height=300)
-    )
-    return area
 
 
 def make_candlestick(df, pct_first_close=None):
@@ -694,6 +608,96 @@ def _remove_watchlist(symbol):
     st.session_state["_wl_dirty"] = True
 
 
+def _goto(symbol):
+    """A 'View' click pre-fills the search box on the next rerun."""
+    st.session_state["pending_query"] = symbol
+
+
+# --- Home screen + small HTML building blocks ----------------------------
+
+# Hebrew names for verdict / analyst labels (the engine keeps English keys).
+HE_LABELS = {
+    "Strong Buy": "קנייה חזקה", "Buy": "קנייה", "Hold": "החזקה",
+    "Sell": "מכירה", "Underperform": "תת-ביצוע", "Strong Sell": "מכירה חזקה",
+}
+# CSS class per verdict, for the colored word on the verdict card.
+VERDICT_CLASS = {"Strong Buy": "up", "Buy": "up", "Hold": "hold", "Sell": "down"}
+
+# The six numbers shown up front on a stock page (the rest sit under
+# "כל נתוני החברה"). Beta comes from the technicals group.
+KEY_METRICS = ["pe", "revenue_growth", "profit_margin", "debt_to_equity",
+               "dividend_yield", "beta"]
+KEY_METRIC_LABELS = {
+    "pe": "מכפיל רווח (P/E)", "revenue_growth": "צמיחת הכנסות",
+    "profit_margin": "שולי רווח", "debt_to_equity": "חוב להון",
+    "dividend_yield": "תשואת דיבידנד", "beta": "בטא (תנודתיות)",
+}
+
+
+def he_label(label):
+    """Hebrew for a verdict/analyst label; unknown labels pass through."""
+    return HE_LABELS.get(label, label or "—")
+
+
+def _esc(text):
+    """Escape text we put inside our own HTML snippets."""
+    return html.escape(str(text or ""))
+
+
+def chip_html(value, suffix=""):
+    """A small green/red pill like '+2.31%'. None -> a muted dash."""
+    if value is None:
+        return '<span class="sa-chip sa-flat">—</span>'
+    cls = "sa-up" if value > 0 else ("sa-down" if value < 0 else "sa-flat")
+    return f'<span class="sa-chip {cls}">{value:+.2f}{suffix}</span>'
+
+
+def header_card_html(quote):
+    """Name, symbol · exchange, big price and today's change."""
+    cur = quote.currency or ""
+    price = f"{quote.price:,.2f} {cur}" if quote.price is not None else "—"
+    today = (chip_html(quote.change_pct, "%") + ' <span class="sa-sub">היום</span>'
+             if quote.change_pct is not None else '<span class="sa-sub">אין נתון יומי</span>')
+    return (
+        f'<div class="sa-name">{_esc(quote.name or quote.symbol)}</div>'
+        f'<div class="sa-sub"><span class="sa-num">{_esc(quote.symbol)}</span> · '
+        f'{_esc(quote.exchange or "")}</div>'
+        f'<div class="sa-row"><span class="sa-price sa-num">{_esc(price)}</span>{today}</div>'
+    )
+
+
+# Short Hebrew names for the engine's signal keys (the engine's own names are
+# English). Used in the one-line "for / against" summary of the verdict card.
+SIGNAL_HE = {
+    "pe": "תמחור", "growth": "צמיחה", "fwd_pe": "תחזית רווחים",
+    "margin": "רווחיות", "d2e": "חוב", "fcf": "תזרים מזומנים",
+    "ma50": "מגמה קצרה (50 יום)", "ma200": "מגמה ארוכה (200 יום)",
+    "ma_cross": "חציית ממוצעים", "rsi": "מומנטום (RSI)",
+    "range52": "מיקום בטווח השנתי", "macd": "מומנטום (MACD)",
+    "bollinger": "רצועות בולינגר", "vol_confirm": "אישור נפח מסחר",
+    "obv": "לחץ קנייה/מכירה (OBV)", "ad": "צבירה/הפצה",
+}
+
+
+def _signal_he(ws):
+    return SIGNAL_HE.get(getattr(ws, "key", None), ws.name)
+
+
+def _why_sentence(hv):
+    """One plain line from the strongest signals: what helps, what hurts."""
+    if hv is None or not hv.breakdown:
+        return ""
+    ranked = sorted(hv.breakdown, key=lambda ws: ws.weighted, reverse=True)
+    pros = [_signal_he(ws) for ws in ranked if ws.weighted > 0][:2]
+    cons = [_signal_he(ws) for ws in reversed(ranked) if ws.weighted < 0][:2]
+    parts = []
+    if pros:
+        parts.append("בעד: " + ", ".join(pros))
+    if cons:
+        parts.append("נגד: " + ", ".join(cons))
+    return " · ".join(parts)
+
+
 def breakdown_html(breakdown):
     """The per-signal verdict breakdown as one left-to-right HTML list."""
     items = []
@@ -701,78 +705,160 @@ def breakdown_html(breakdown):
         base_sign = "+" if ws.points > 0 else ""  # minus self-prints
         w_sign = "+" if ws.weighted > 0 else ""
         items.append(
-            f"<li><b>{html.escape(ws.name)}</b> — {html.escape(str(ws.measured))}"
-            f" | base {base_sign}{ws.points} × weight {ws.weight:.1f}"
-            f" = <b>{w_sign}{ws.weighted:.1f}</b></li>")
+            f"<li><b>{_esc(ws.name)}</b> ({_esc(_signal_he(ws))}): "
+            f"{_esc(str(ws.measured))} | base {base_sign}{ws.points} × weight "
+            f"{ws.weight:.1f} = <b>{w_sign}{ws.weighted:.1f}</b></li>")
     return ('<div dir="ltr" style="text-align:left"><ul style="margin:0">'
             + "".join(items) + "</ul></div>")
 
 
-def debug_enabled():
-    """True when the page URL has ?debug=1 (shows the Debug panel)."""
+def verdict_card_html(verdict):
+    """The 'bottom line' card: the 1-year verdict big, the 3 horizons small."""
+    main = verdict.horizons.get("1Y")
+    if main is None or not main.enough_data:
+        main = next((verdict.horizons.get(h) for h in engine.HORIZONS
+                     if verdict.horizons.get(h) and verdict.horizons.get(h).enough_data), None)
+    if main is None:
+        return '<div class="sa-card">אין מספיק נתונים לפסיקה.</div>'
+    cls = VERDICT_CLASS.get(main.label, "hold")
+    span = {"6M": "חצי שנה", "1Y": "שנה", "5Y": "5 שנים"}
+    pills = []
+    for h in engine.HORIZONS:
+        hv = verdict.horizons.get(h)
+        if hv is None or not hv.enough_data:
+            pills.append(f'<div><b>—</b><span>{span[h]}</span></div>')
+        else:
+            c = VERDICT_CLASS.get(hv.label, "hold")
+            pills.append(f'<div><b style="color:var(--sa-{c})">{_esc(he_label(hv.label))}</b>'
+                         f'<span>{span[h]} · <span class="sa-num">{hv.score:.0f}</span></span></div>')
+    why = _why_sentence(main)
+    return (
+        '<div class="sa-card"><div class="sa-verdict"><div>'
+        f'<div class="sa-eyebrow">השורה התחתונה · {span.get(main.horizon, "")}</div>'
+        f'<div class="sa-word" style="color:var(--sa-{cls})">{_esc(he_label(main.label))}</div></div>'
+        f'<div class="sa-score"><span class="sa-num"><b>{main.score:.0f}</b><span class="sa-sub">/100</span></span>'
+        f'<div class="sa-bar"><i style="width:{main.score:.0f}%;background:var(--sa-{cls})"></i></div></div></div>'
+        + (f'<div class="sa-why">{_esc(why)}</div>' if why else "")
+        + f'<div class="sa-horiz">{"".join(pills)}</div>'
+        '<div class="sa-fine">חוות דעת אוטומטית לפי כללים ונתונים ציבוריים של היום. '
+        'שלושת הטווחים שוקלים את אותם נתונים אחרת. לא ייעוץ השקעות ולא תחזית.</div></div>'
+    )
+
+
+def combined_key_metrics(company, technicals):
+    """One MetricGroup holding the KEY_METRICS from company + technicals."""
+    merged = dict(company.metrics)
+    if technicals is not None and technicals.found and "beta" in technicals.metrics:
+        merged["beta"] = technicals.metrics["beta"]
+    return engine.MetricGroup(True, company.symbol, company.currency, merged,
+                              company.source_note)
+
+
+def range_change_pct(df):
+    """% change from the first to the last close of the chart's range."""
     try:
-        return st.query_params.get("debug") == "1"
+        first = engine.first_close(df)
+        last = float(df["Close"].dropna().iloc[-1])
+        return (last / first - 1) * 100 if first else None
     except Exception:
-        return False
+        return None
 
 
-def _goto(symbol):
-    """A 'View' click pre-fills the search box on the next rerun."""
-    st.session_state["pending_query"] = symbol
+def make_price_area(df, as_percent=False):
+    """Clean line + soft area fill; green if the range ended up, red if down."""
+    data = df[["Date", "Close"]].dropna().copy()
+    field_name, title, fmt = "Close", None, ",.2f"
+    if as_percent:
+        base = engine.first_close(df)
+        data["Pct"] = engine.price_to_pct_change(data["Close"], base)
+        field_name, fmt = "Pct", "+.1f"
+    change = range_change_pct(df)
+    color = "#3CC98A" if (change is None or change >= 0) else "#FF6B6B"
+    lo, hi = float(data[field_name].min()), float(data[field_name].max())
+    pad = (hi - lo) * 0.08 or 1.0
+    y = alt.Y(f"{field_name}:Q", title=title, scale=alt.Scale(domain=[lo - pad, hi + pad], nice=False),
+              axis=alt.Axis(format=fmt, grid=True, gridOpacity=0.12, domain=False, ticks=False,
+                            labelColor="#8B97AA", tickCount=4))
+    x = alt.X("Date:T", title=None, axis=alt.Axis(grid=False, labelColor="#8B97AA",
+                                                   domain=False, ticks=False, tickCount=4))
+    base = alt.Chart(data).encode(x=x, y=y, tooltip=[alt.Tooltip("Date:T", title="תאריך"),
+                                                    alt.Tooltip(f"{field_name}:Q", format=fmt, title="")])
+    area = base.mark_area(
+        line={"color": color, "strokeWidth": 2},
+        color=alt.Gradient(gradient="linear", x1=1, x2=1, y1=1, y2=0,
+                           stops=[alt.GradientStop(color="rgba(0,0,0,0)", offset=0),
+                                  alt.GradientStop(color=color, offset=1)]),
+        opacity=0.35, clip=True,
+    )
+    return (area.properties(height=230)
+            .configure_view(strokeWidth=0)
+            .configure(background="transparent"))
 
 
-def render_watchlist_sidebar():
-    """Draw the followed stocks in the sidebar with a compact quote, plus
-    'View' and 'Remove' buttons."""
-    with st.sidebar:
-        st.markdown("### ⭐ במעקב")
-        watchlist = st.session_state.get("watchlist", [])
-        if not watchlist:
-            st.caption("עוד אין מניות. חפש מניה ולחץ **הוסף למעקב**.")
-            return
+def _go_home():
+    """Back button: clear the search so the home screen shows."""
+    st.session_state["search_box"] = ""
+
+
+def render_watchlist_home():
+    """The followed stocks as tappable rows on the home screen."""
+    st.markdown("#### במעקב")
+    watchlist = st.session_state.get("watchlist", [])
+    if not watchlist:
+        st.caption("עוד אין מניות במעקב. חפש מניה ולחץ **☆ הוסף למעקב**.")
+        return
+    with st.container(key="watchlist"):
         for sym in watchlist:
-            line = f"**{sym}**"
+            # \u2066...\u2069 keep each number/symbol left-to-right inside
+            # the Hebrew (right-to-left) row, so "+1.12%" never comes out jumbled.
+            label = f"**\u2066{sym}\u2069**"
             try:
                 q = load_quote(sym)
                 if q and q.found:
-                    ccy = q.currency or ""
+                    label = (f"**{q.name or sym}** · \u2066{sym}\u2069 · "
+                             f"\u2066{q.price:,.2f} {q.currency or ''}\u2069")
                     if q.change_pct is not None:
-                        line += f" — {q.price:,.2f} {ccy} ({q.change_pct:+.2f}%)"
-                    else:
-                        line += f" — {q.price:,.2f} {ccy}"
+                        color = "green" if q.change_pct >= 0 else "red"
+                        label += f" · :{color}[\u2066{q.change_pct:+.2f}%\u2069]"
             except Exception:
                 pass
-            st.markdown(line)
-            cols = st.columns(2)
-            cols[0].button("הצג", key=f"wl_view_{sym}", on_click=_goto, args=(sym,))
-            cols[1].button("הסר", key=f"wl_rm_{sym}",
-                           on_click=_remove_watchlist, args=(sym,))
-        st.caption("נשמר בדפדפן שלך.")
+            st.button(label, key=f"wl_view_{sym}", on_click=_goto, args=(sym,),
+                      width="stretch")
+    st.caption("נשמר בדפדפן במכשיר הזה.")
 
 
 # --- Page content ---------------------------------------------------------
-
-st.title("📈 המניות שלי")
-st.write("הקלד סימול או שם של מניה ולחץ Enter.")
-
-# Load the watchlist and draw it in the sidebar. A "View" click stores a
-# pending query that we move into the search box BEFORE the widget is created.
+#
+# Two screens in one script, chosen by the search box:
+#   * empty search  -> HOME: "My stocks" (search + the followed stocks)
+#   * a stock found -> STOCK PAGE: one scroll, the bottom line first
+#
+# Load the watchlist first. A row click stores a pending query that we move
+# into the search box BEFORE the widget is created (Streamlit rule).
 ls = init_watchlist()
 if "pending_query" in st.session_state:
     st.session_state["search_box"] = st.session_state.pop("pending_query")
-render_watchlist_sidebar()
 
-# A search box: accepts a ticker, a company name, or a Tel-Aviv (.TA) symbol.
-# .strip() removes accidental spaces; pressing Enter reruns the script.
+home = not (st.session_state.get("search_box") or "").strip()
+
+if home:
+    st.title("המניות שלי")
+else:
+    st.button("→ המניות שלי", key="back_home", on_click=_go_home)
+
+# A search box: accepts a ticker, a company name (English or Hebrew), or a
+# Tel-Aviv (.TA) symbol. Pressing Enter reruns the script.
 query = st.text_input(
-    "חיפוש מניה: סימול, שם חברה או מניה בתל אביב (.TA)",
-    placeholder="למשל: אפל, טבע, NVDA, TEVA.TA",
+    "חיפוש מניה",
+    placeholder="חיפוש: אפל, טבע, NVDA, TEVA.TA…",
     key="search_box",
+    label_visibility="collapsed",
 ).strip()
 
-# Israeli stocks use a .TA ticker on Yahoo (NOT their TASE security number).
-st.caption("טיפ: מניות בתל אביב מחפשים לפי סימול עם `.TA`, למשל `TEVA.TA`, "
-           "ולא לפי מספר נייר הערך.")
+if home:
+    render_watchlist_home()
+    st.caption("טיפ: מניות בבורסה בתל אביב מסתיימות ב-`.TA`, למשל `TEVA.TA`. "
+               "החיפוש לא עובד לפי מספר נייר.")
 
 # Resolve the query to candidate tickers. If there's more than one match, let
 # the user pick the right one (e.g. the Tel-Aviv AVIV.TA, not a US ETF).
@@ -784,24 +870,20 @@ if query:
         matches = []
 
     if not matches:
-        st.error("לא נמצאה מניה כזו. כדאי לבדוק את הסימול או השם.")
-        st.caption("אם זו מניה ישראלית, חפש לפי הסימול עם **.TA** (למשל `AVIV.TA`). "
-                   "מקור הנתונים החינמי (Yahoo Finance) לא מוצא מניות בתל אביב "
-                   "לפי מספר נייר הערך.")
+        st.error("לא מצאתי מניה כזו. כדאי לבדוק את השם או הסימול.")
+        st.caption("מניה ישראלית? חפש לפי הסימול שמסתיים ב-**.TA** (למשל `AVIV.TA`). "
+                   "מקור הנתונים החינמי (Yahoo Finance) לא מכיר מספרי נייר של הבורסה בתל אביב.")
     elif len(matches) == 1:
-        # Only one match -> nothing to ask, just use it.
         symbol = matches[0].symbol
     else:
-        # Several matches -> ASK first. index=None means nothing is pre-selected,
-        # so we do NOT analyse anything until the user actively picks the stock
-        # they meant (e.g. AVIV.TA rather than a US ETF).
+        # Several matches -> ASK first; nothing is analysed until a pick.
         labels = {m.symbol: f"{m.symbol} - {m.name} ({m.exchange or '?'})"
                   for m in matches}
         symbol = st.selectbox(
-            "נמצאו כמה התאמות. לאיזו מניה התכוונת?",
+            "נמצאו כמה מניות. לאיזו התכוונת?",
             options=[m.symbol for m in matches],
             index=None,
-            placeholder="בחר את המניה...",
+            placeholder="בחר מניה…",
             format_func=lambda s: labels.get(s, s),
         )
         if symbol is None:
@@ -809,45 +891,15 @@ if query:
 
 # Once we have a resolved symbol, run the full analysis on it.
 if symbol:
-    # Wrap the data fetch in try/except so a network glitch or unexpected
-    # error shows a friendly message instead of a red crash screen.
     try:
         quote = load_quote(symbol)
     except Exception:
         quote = None
 
     if quote is None or not quote.found:
-        st.error("לא הצלחנו לטעון את המניה. נסה מניה אחרת.")
+        st.error("לא הצלחתי לטעון את המניה הזו. נסה מניה אחרת.")
     else:
-        # ---- Pinned header (stays visible above the tabs) --------------
-        # Company name, then the price large with today's change as a colored
-        # chip (mockup item 5), then the exact symbol and exchange.
-        st.subheader(quote.name)
-        currency = quote.currency or ""
-        if quote.change_abs is not None:
-            cls = "up" if quote.change_abs >= 0 else "down"
-            sign = "+" if quote.change_abs >= 0 else ""
-            chip = (f'<span class="chip {cls}">{sign}{quote.change_abs:,.2f} '
-                    f'({sign}{quote.change_pct:.2f}%)</span> '
-                    '<span style="opacity:.7">היום</span>')
-        else:
-            chip = '<span style="opacity:.7">השינוי היומי לא זמין</span>'
-        st.markdown(f'<span class="price-line">{quote.price:,.2f} {currency}</span>'
-                    f'{chip}', unsafe_allow_html=True)
-        exchange = quote.exchange or "בורסה לא ידועה"
-        st.caption(f"{quote.symbol} · {exchange}")
-
-        # Follow / unfollow this stock (saved in the browser).
-        following = engine.in_watchlist(st.session_state.get("watchlist", []), symbol)
-        st.button(
-            "★ הסר ממעקב" if following else "⭐ הוסף למעקב",
-            key="wl_toggle", on_click=_toggle_watchlist, args=(symbol,),
-        )
-
-        # ---- Load everything once (cached); each tab renders its slice. -
-        # PURE LAYOUT: these are the same cached calls as before, just hoisted
-        # so every tab (and the debug panel) can read the data it needs. No
-        # computation changes — Streamlit runs all tab bodies each rerun anyway.
+        # ---- Load everything once (cached); each section renders its slice.
         try:
             verdict = load_verdict(symbol)
         except Exception:
@@ -876,158 +928,159 @@ if symbol:
             sector = sm.value if (sm and sm.available) else None
         metric_context = {"sector": sector, "price": quote.price}
 
-        tab_overview, tab_ai, tab_charts, tab_fund, tab_tech, tab_own = st.tabs(
-            ["סקירה", "ניתוח AI", "גרפים", "כל הנתונים", "ניתוח טכני",
-             "מי מחזיק"])
+        # ======================= Header =======================
+        st.markdown(header_card_html(quote), unsafe_allow_html=True)
+        following = engine.in_watchlist(st.session_state.get("watchlist", []), symbol)
+        st.button(
+            "★ במעקב (לחץ להסרה)" if following else "☆ הוסף למעקב",
+            key="wl_toggle", on_click=_toggle_watchlist, args=(symbol,),
+        )
 
-        # ======================= Overview =======================
-        with tab_overview:
-            with st.expander("השורה התחתונה", expanded=True):
-                if verdict is None or not verdict.found:
-                    st.info("אין חוות דעת זמינה למניה הזו.")
-                else:
-                    # Three colour-coded tiles, short -> long horizon.
-                    columns = st.columns(len(engine.HORIZONS))
-                    for column, horizon in zip(columns, engine.HORIZONS):
-                        hv = verdict.horizons.get(horizon)
-                        column.markdown(f"**{HORIZON_NAMES.get(horizon, horizon)}**")
+        # ======================= Price chart =======================
+        range_key = st.segmented_control(
+            "טווח",
+            options=list(engine.RANGES.keys()),
+            default="6M",
+            key="range_key",
+            label_visibility="collapsed",
+        ) or "6M"  # clicking the active button deselects it -> keep a chart
+        history = load_history(symbol, range_key)
+        chart_type = st.session_state.get("chart_type", "קו")
+        as_percent = st.session_state.get("as_percent", False)
+
+        if not history.found:
+            st.info(f"אין נתוני גרף לטווח {range_key} ({history.reason}).")
+        elif chart_type == "נרות":
+            base_close = engine.first_close(history.data) if as_percent else None
+            st.altair_chart(make_candlestick(history.data, pct_first_close=base_close),
+                            width="stretch")
+            if base_close:
+                st.caption("הנרות מראים מחיר (ציר שמאל). הציר הימני מראה שינוי באחוזים "
+                           "מתחילת הטווח.")
+        else:
+            st.altair_chart(make_price_area(history.data, as_percent=as_percent),
+                            width="stretch")
+        if history.found:
+            change = range_change_pct(history.data)
+            if change is not None:
+                st.markdown(
+                    f'<span class="sa-sub">בטווח {range_key}:</span> '
+                    f'{chip_html(change, "%")}', unsafe_allow_html=True)
+
+        with st.expander("אפשרויות גרף", expanded=False):
+            st.radio("סוג גרף", options=["קו", "נרות"], horizontal=True, key="chart_type")
+            st.toggle("הצג כשינוי באחוזים מתחילת הטווח", key="as_percent")
+
+        # ======================= Bottom line (verdict) =======================
+        if verdict is None or not verdict.found:
+            st.info("אין פסיקה זמינה למניה הזו.")
+        else:
+            st.markdown(verdict_card_html(verdict), unsafe_allow_html=True)
+            with st.expander("למה? איך חושב הציון", expanded=False):
+                horizon_tabs = st.tabs([HORIZON_NAMES.get(h, h) for h in engine.HORIZONS])
+                for htab, horizon in zip(horizon_tabs, engine.HORIZONS):
+                    hv = verdict.horizons.get(horizon)
+                    with htab:
                         if hv is None or not hv.enough_data:
-                            column.info("אין מספיק נתונים")
+                            st.info(hv.reason if hv else "אין מספיק נתונים.")
                             continue
-                        color = VERDICT_COLORS.get(hv.label, "gray")
-                        column.markdown(f":{color}[**{he(hv.label)}**]")
-                        # Score as a metric so it carries a "?" tooltip.
-                        column.metric("Score", f"{hv.score:.0f}/100",
-                                      help=engine.HELP_TEXTS.get("verdict_score"),
-                                      label_visibility="collapsed")
-                        column.progress(int(round(hv.score)))
-
-                    st.caption(
-                        "⚠️ חוות דעת אוטומטית לפי כללים ונתונים ציבוריים, **לא ייעוץ "
-                        "השקעות.** שלושת הטווחים שוקלים את **אותם נתונים של היום** "
-                        "בצורה שונה, והם **לא** תחזית."
-                    )
-
-                    # Transparent per-horizon breakdown. Rendered inline (Streamlit
-                    # forbids an expander inside an expander), one tab per horizon.
-                    st.markdown("**למה? (איך חושבה חוות הדעת)**")
-                    horizon_tabs = st.tabs([HORIZON_NAMES.get(h, h)
-                                            for h in engine.HORIZONS])
-                    for htab, horizon in zip(horizon_tabs, engine.HORIZONS):
-                        hv = verdict.horizons.get(horizon)
-                        with htab:
-                            if hv is None or not hv.enough_data:
-                                st.info(hv.reason if hv else "אין מספיק נתונים.")
-                                continue
-                            st.caption(
-                                f"ציון משוקלל {hv.score:.1f}/100 (50 = ניטרלי). "
-                                "כל סימן: base (נקודות בסיס) × weight (משקל הטווח) = התרומה."
-                            )
-                            # The signal names/readings come from the engine in
-                            # English, so this list is shown left-to-right as a
-                            # block (mixing it into RTL Hebrew garbles the order).
-                            st.markdown(breakdown_html(hv.breakdown),
-                                        unsafe_allow_html=True)
-
-            with st.expander("אנחנו מול וול סטריט", expanded=True):
-                if analyst is None or not analyst.found or not analyst.has_coverage:
-                    st.info("אין אנליסטים שמכסים את המניה (נפוץ במניות קטנות ובתל "
-                            "אביב), אז אין למה להשוות.")
-                else:
-                    col_ours, col_street = st.columns(2)
-                    with col_ours:
-                        st.markdown("**חוות הדעת שלנו (שנה)**")
-                        hv = (verdict.horizons.get("1Y")
-                              if verdict is not None and verdict.found else None)
-                        if hv is not None and hv.enough_data:
-                            c = VERDICT_COLORS.get(hv.label, "gray")
-                            st.markdown(f":{c}[**{he(hv.label)}**]")
-                            st.metric("Score", f"{hv.score:.0f}/100",
-                                      help=engine.HELP_TEXTS.get("verdict_score"),
-                                      label_visibility="collapsed")
-                        else:
-                            st.markdown(MISSING)
-                        st.caption("לפי כללים, ממחיר ונתוני החברה")
-                    with col_street:
-                        st.markdown("**קונצנזוס האנליסטים**")
-                        c = ANALYST_COLORS.get(analyst.label, "gray")
-                        st.markdown(f":{c}[**{he(analyst.label)}**]")
-                        if analyst.mean is not None:
-                            st.metric("Mean rating", f"{analyst.mean:.2f}/5",
-                                      help=engine.HELP_TEXTS.get("analyst_mean"),
-                                      label_visibility="collapsed")
-                            st.caption(f"לפי {analyst.num_analysts or '?'} אנליסטים")
-
-                    # Mean price target vs current price (implied upside / downside).
-                    if analyst.target_mean and analyst.current_price:
-                        cur = analyst.currency or ""
-                        up = analyst.upside_pct or 0.0
-                        arrow = "🔺" if up >= 0 else "🔻"
-                        sign = "+" if up >= 0 else ""
-                        st.write(
-                            f"**יעד מחיר ממוצע:** {analyst.target_mean:,.2f} {cur} "
-                            f"({arrow} {sign}{up:.1f}% מהמחיר הנוכחי "
-                            f"{analyst.current_price:,.2f})"
+                        st.caption(
+                            f"ציון משוקלל {hv.score:.1f}/100 (50 = ניטרלי). "
+                            "כל סימן: base (נקודות בסיס) × weight (משקל לטווח) = "
+                            "התרומה לציון."
                         )
-                        if analyst.target_low and analyst.target_high:
-                            st.caption(f"טווח היעדים של האנליסטים: "
-                                       f"{analyst.target_low:,.2f} עד "
-                                       f"{analyst.target_high:,.2f} {cur}")
+                        # Engine text is English, so show the list as one
+                        # left-to-right block (mixed into RTL it garbles).
+                        st.markdown(breakdown_html(hv.breakdown),
+                                    unsafe_allow_html=True)
 
-                    # (Recent analyst actions now live in the Ownership tab.)
-
-                    # ALWAYS say something about how we compare to the analysts.
-                    divergence = engine.explain_divergence(verdict, analyst, "1Y")
-                    if not divergence.diverges:
-                        # Agreement -> a short positive note (never an empty section).
-                        st.success("✅ " + (divergence.note or
-                                   "חוות הדעת שלנו תואמת לקונצנזוס האנליסטים."))
+        # ======================= Wall Street =======================
+        with st.container(border=True):
+            st.markdown("#### מול וול סטריט")
+            if analyst is None or not analyst.found or not analyst.has_coverage:
+                st.caption("אין סיקור של אנליסטים למניה הזו (נפוץ במניות קטנות ובתל אביב), "
+                           "אז אין למה להשוות.")
+            else:
+                col_ours, col_street = st.columns(2)
+                with col_ours:
+                    st.markdown("**הפסיקה שלנו (שנה)**")
+                    hv = (verdict.horizons.get("1Y")
+                          if verdict is not None and verdict.found else None)
+                    if hv is not None and hv.enough_data:
+                        c = VERDICT_COLORS.get(hv.label, "gray")
+                        st.markdown(f":{c}[**{he_label(hv.label)}**] · {hv.score:.0f}/100",
+                                    help=engine.HELP_TEXTS.get("verdict_score"))
                     else:
-                        if divergence.direction == "analysts_more_bullish":
-                            title = (f"⚖️ למה יש פער? האנליסטים ({he(divergence.analyst_label)}) "
-                                     f"אופטימיים יותר מהתחזית שלנו לשנה "
-                                     f"({he(divergence.our_label)})")
-                            drivers_word = "מה מוריד את הציון שלנו"
-                        else:
-                            title = (f"⚖️ למה יש פער? התחזית שלנו לשנה ({he(divergence.our_label)}) "
-                                     f"אופטימית יותר מהאנליסטים "
-                                     f"({he(divergence.analyst_label)})")
-                            drivers_word = "מה מעלה את הציון שלנו"
-                        # Inline (an expander can't nest inside this one).
-                        st.markdown(f"**{title}**")
-                        st.write(divergence.note)
-                        if divergence.drivers:
-                            st.write(f"**{drivers_word}:**")
-                            for name, measured, weighted in divergence.drivers:
-                                st.write(f"- **{name}** — {measured} ({weighted:+.1f})")
+                        st.markdown("—")
+                with col_street:
+                    st.markdown("**האנליסטים**")
+                    c = ANALYST_COLORS.get(analyst.label, "gray")
+                    mean_txt = (f" · {analyst.mean:.2f}/5" if analyst.mean is not None else "")
+                    st.markdown(f":{c}[**{he_label(analyst.label)}**]{mean_txt}",
+                                help=engine.HELP_TEXTS.get("analyst_mean"))
+                    if analyst.num_analysts:
+                        st.caption(f"{analyst.num_analysts} אנליסטים")
 
-                # Link out — per-site analyst scores are often paywalled.
-                st.caption(
-                    f"פירוט נוסף ב-[Yahoo Finance]"
-                    f"(https://finance.yahoo.com/quote/{symbol}/analysis). "
-                    "ציוני אנליסטים באתרים אחרים (כמו TipRanks) בדרך כלל בתשלום."
-                )
+                if analyst.target_mean and analyst.current_price:
+                    cur = analyst.currency or ""
+                    up = analyst.upside_pct or 0.0
+                    st.markdown(
+                        f"**יעד מחיר ממוצע:** <span class='sa-num'>{analyst.target_mean:,.2f} {cur}</span> "
+                        f"{chip_html(up, '%')}", unsafe_allow_html=True)
+                    if analyst.target_low and analyst.target_high:
+                        st.caption(f"טווח היעדים: {analyst.target_low:,.2f} עד "
+                                   f"{analyst.target_high:,.2f} {cur}")
+                st.caption("זה מה שוול סטריט מצפה לו, לא התחזית שלנו.")
 
-            with st.expander("נתונים עיקריים", expanded=True):
-                st.caption("6 הנתונים החשובים. לחץ על **?** להסבר. כל השאר בלשונית "
-                           "**כל הנתונים**.")
-                render_key_metrics(company, technicals, context=metric_context)
-                st.caption(COLOR_LEGEND)
+                # ALWAYS say something about how we compare to the analysts.
+                divergence = engine.explain_divergence(verdict, analyst, "1Y")
+                if not divergence.diverges:
+                    st.success("✅ " + (divergence.note or
+                               "הפסיקה שלנו תואמת את דעת האנליסטים."))
+                else:
+                    if divergence.direction == "analysts_more_bullish":
+                        title = (f"⚖️ למה יש פער? האנליסטים ({he_label(divergence.analyst_label)}) "
+                                 f"אופטימיים יותר מאיתנו ({he_label(divergence.our_label)})")
+                        drivers_word = "מה מוריד את הציון שלנו"
+                    else:
+                        title = (f"⚖️ למה יש פער? אנחנו ({he_label(divergence.our_label)}) "
+                                 f"אופטימיים יותר מהאנליסטים ({he_label(divergence.analyst_label)})")
+                        drivers_word = "מה מעלה את הציון שלנו"
+                    st.markdown(f"**{title}**")
+                    st.write(divergence.note)
+                    if divergence.drivers:
+                        st.write(f"**{drivers_word}:**")
+                        for name, measured, weighted in divergence.drivers:
+                            st.write(f"- **{name}**: {measured} ({weighted:+.1f})")
+            st.caption(
+                f"פירוט נוסף ב-[Yahoo Finance](https://finance.yahoo.com/quote/{symbol}/analysis). "
+                "ציונים של אתרים כמו TipRanks בדרך כלל בתשלום."
+            )
 
-        # ======================= AI analysis =======================
-        with tab_ai:
+        # ======================= Key numbers =======================
+        st.markdown("#### נתונים עיקריים")
+        if company is not None and company.found and company.metrics:
+            key_group = combined_key_metrics(company, technicals)
+            with st.container(key="kpis"):
+                render_metrics(key_group, keys=KEY_METRICS, columns_per_row=2,
+                               context=metric_context, labels=KEY_METRIC_LABELS)
+            st.caption("🟢 חוזקה · 🟡 לשים לב · 🔴 חולשה. כללי אצבע מהמספרים, "
+                       "לא ייעוץ השקעות. לחץ על **?** להסבר.")
+        else:
+            st.info("אין נתוני חברה זמינים למניה הזו.")
+
+        # ======================= More (collapsed) =======================
+        with st.expander("🤖 ניתוח AI", expanded=False):
             # OPTIONAL; Gemini, button-triggered. We NEVER auto-call Gemini — the
             # user clicks a button. Each (symbol, depth) result is cached in
             # session_state so re-clicks / reruns don't re-call (protecting
-            # free-tier quota). With no key the buttons are disabled (tooltip) and
-            # nothing else appears; any failure renders a muted note, never raises.
-            st.markdown("**🤖 ניתוח AI**")
+            # free-tier quota). With no key the buttons are disabled.
             gemini_key = get_gemini_key()
             no_key = not gemini_key
             ai_cache = st.session_state.setdefault("_gemini_cache", {})
             ai_active = st.session_state.setdefault("_gemini_active_depth", {})
 
-            disabled_help = "צריך מפתח Gemini כדי להפעיל" if no_key else None
+            disabled_help = "צריך להגדיר מפתח Gemini כדי להפעיל" if no_key else None
             col_quick, col_deep = st.columns(2)
             if col_quick.button("⚡ הסבר קצר", key="ai_quick_btn", disabled=no_key,
                                 help=disabled_help, width="stretch"):
@@ -1036,13 +1089,10 @@ if symbol:
                                help=disabled_help, width="stretch"):
                 ai_active[symbol] = "deep"
 
-            # Show the most-recently-requested depth for this symbol (if any). The
-            # result is generated once, then served from the per-(symbol, depth) cache.
             depth = ai_active.get(symbol)
             if depth:
                 cache_key = (symbol, depth)
                 if cache_key not in ai_cache:
-                    # Build the payload from data already on the page, then call once.
                     divergence_for_ai = None
                     try:
                         if (verdict is not None and analyst is not None
@@ -1051,248 +1101,139 @@ if symbol:
                                 verdict, analyst, "1Y")
                     except Exception:
                         divergence_for_ai = None
-                    try:
-                        company_ai = load_company(symbol)
-                    except Exception:
-                        company_ai = None
-                    try:
-                        technicals_ai = load_technicals(symbol)
-                    except Exception:
-                        technicals_ai = None
-                    payload = _gemini_payload(symbol, verdict, company_ai,
-                                              technicals_ai, analyst, divergence_for_ai)
-                    ai_cache[cache_key] = gemini_helper.explain_verdict(
-                        payload, gemini_key, depth=depth)
+                    payload = _gemini_payload(symbol, verdict, company,
+                                              technicals, analyst, divergence_for_ai)
+                    with st.spinner("Gemini כותב…"):
+                        ai_cache[cache_key] = gemini_helper.explain_verdict(
+                            payload, gemini_key, depth=depth)
 
                 explanation = ai_cache[cache_key]
                 if explanation:
                     st.info(explanation)
-                    st.caption("סיכום שנכתב על ידי AI מהנתונים שבלשוניות האחרות. "
-                               "לא ייעוץ השקעות.")
+                    st.caption("סיכום שנכתב על ידי AI מהנתונים שבדף. לא ייעוץ השקעות.")
                 else:
-                    # Only AFTER a click: a small muted note. Never auto, never crash.
                     st.caption("_ניתוח ה-AI לא זמין כרגע._")
+            else:
+                st.caption("Gemini מסביר במילים פשוטות את הפסיקה והנתונים. רץ רק בלחיצה, "
+                           "כדי לחסוך במכסה החינמית.")
 
-        # ======================= Charts =======================
-        with tab_charts:
-            with st.expander("גרף מחיר", expanded=True):
-                # Range selector as a row of buttons (segmented control). The keys
-                # come straight from the engine so the two never drift apart.
-                range_key = st.segmented_control(
-                    "Range",
-                    options=list(engine.RANGES.keys()),
-                    default="1M",
-                    label_visibility="collapsed",
+        with st.expander("כל נתוני החברה", expanded=False):
+            if company is not None and company.found and company.metrics:
+                render_metrics(company, context=metric_context)
+            else:
+                st.caption("_אין נתוני חברה זמינים._")
+
+        with st.expander("ניתוח טכני", expanded=False):
+            if technicals is not None and technicals.found and technicals.metrics:
+                st.markdown("**מחיר, מגמה ומומנטום**")
+                render_metrics(technicals, keys=PRICE_TREND_KEYS, context=metric_context)
+                st.markdown("**נפח מסחר ולחץ קנייה/מכירה (הערכות)**")
+                render_metrics(technicals, keys=PRESSURE_KEYS, context=metric_context)
+                st.caption(
+                    "נתונים חינמיים לא מפרידים בין נפח קנייה לנפח מכירה, ולכן **OBV** "
+                    "ו-**Accumulation/Distribution** הם הערכות שמחושבות ממחיר ונפח, "
+                    "לא נתוני מסחר אמיתיים."
                 )
-                # If the user clicks the active button it deselects (returns None);
-                # fall back to the default so a chart is always shown.
-                range_key = range_key or "1M"
-
-                # Toggle between a clean line of closing prices and candlesticks.
-                chart_type = st.radio(
-                    "סוג גרף",
-                    options=["Line", "Candlestick"],
-                    format_func={"Line": "קו", "Candlestick": "נרות"}.get,
-                    horizontal=True,
-                )
-
-                # Y-axis toggle: actual Price (default) vs % change from the start
-                # of the selected range (normalised so the first point = 0%).
-                as_percent = st.toggle(
-                    "הצג כשינוי באחוזים מתחילת הטווח",
-                    value=False,
-                    help="מנרמל את הגרף כך שתחילת הטווח = 0%, ומראה את הרווח או "
-                         "ההפסד באחוזים לאורך הטווח.",
-                )
-
-                # Fetch the candles for the chosen range (cached).
-                history = load_history(symbol, range_key)
-
-                if not history.found:
-                    # Empty range (common for 1D/1W intraday on the free tier).
-                    st.info(f"אין נתוני גרף לטווח {range_key}: {history.reason}")
-                else:
-                    if chart_type == "Candlestick":
-                        # Candles always plot price ($) on the LEFT axis. With % ON
-                        # we keep the candles and add a linked RIGHT "% change" axis
-                        # instead of swapping in a line (for one stock the % line
-                        # would just trace the candles — see price_to_pct_change).
-                        base_close = engine.first_close(history.data) if as_percent else None
-                        st.altair_chart(
-                            make_candlestick(history.data, pct_first_close=base_close),
-                            width="stretch",
-                        )
-                        if base_close:
-                            st.caption("ℹ️ הנרות מראים מחיר (ציר שמאלי). הציר הימני "
-                                       "מראה את השינוי המצטבר באחוזים מתחילת הטווח.")
-                    elif as_percent:
-                        # Line + % view: a normalised line (start of range = 0%).
-                        pct_df = history.data[["Date"]].copy()
-                        pct_df["Pct"] = engine.price_to_pct_change(
-                            history.data["Close"], engine.first_close(history.data))
-                        st.altair_chart(make_line_chart(pct_df, "Pct", "% שינוי"),
-                                        width="stretch")
-                    else:
-                        # Clean line of closing prices, green/red by the range.
-                        st.altair_chart(make_line_chart(history.data), width="stretch")
-
-            with st.expander("נפח מסחר", expanded=False):
-                # Same logic as before: only when there's real volume for this range.
                 has_volume = False
                 if history.found and "Volume" in history.data.columns:
                     volumes = history.data["Volume"].dropna()
                     has_volume = len(volumes) > 0 and float(volumes.sum()) > 0
                 if has_volume:
+                    st.markdown(f"**נפח מסחר ({range_key})**")
                     st.altair_chart(make_volume_chart(history.data), width="stretch")
-                else:
-                    st.caption("_אין נתוני נפח מסחר לטווח הזה._")
-
-        # ======================= Fundamentals =======================
-        with tab_fund:
-            with st.expander("נתוני החברה", expanded=True):
-                st.caption("העסק שמאחורי המניה. לחץ על **?** בכל נתון להסבר פשוט.")
-                if company is not None and company.found and company.metrics:
-                    st.caption(COLOR_LEGEND)
-                    render_metrics(company, context=metric_context)
-                else:
-                    st.info("אין נתוני חברה זמינים למניה הזו.")
-
-        # ======================= Technicals =======================
-        with tab_tech:
-            st.caption("איך מחיר המניה עצמו התנהג.")
-            if technicals is not None and technicals.found and technicals.metrics:
-                with st.expander("רמות מחיר, מגמה ומומנטום", expanded=True):
-                    st.caption(COLOR_LEGEND)
-                    render_metrics(technicals, keys=PRICE_TREND_KEYS,
-                                   context=metric_context)
-                with st.expander("נפח מסחר ולחץ קנייה/מכירה (הערכות)",
-                                 expanded=False):
-                    render_metrics(technicals, keys=PRESSURE_KEYS,
-                                   context=metric_context)
-                    st.caption(
-                        "הערה: הנתונים החינמיים לא מפרידים בין נפח קנייה לנפח מכירה, "
-                        "אז **OBV** ו-**Accumulation/Distribution** הם *הערכות* של לחץ "
-                        "קנייה/מכירה לפי מחיר ונפח, ולא נתוני פקודות אמיתיים."
-                    )
             else:
-                st.info("אין נתונים טכניים זמינים למניה הזו.")
+                st.caption("_אין נתונים טכניים זמינים._")
 
-        # ======================= Ownership =======================
-        with tab_own:
-            with st.expander("גופים מוסדיים בולטים", expanded=True):
-                if holders is None or not holders.found:
-                    st.caption("_אין נתונים על מחזיקים מוסדיים במניה הזו._")
+        with st.expander("מוסדיים גדולים", expanded=False):
+            if holders is None or not holders.found:
+                st.caption("_אין נתוני מחזיקים מוסדיים למניה הזו._")
+            else:
+                if holders.institutions_pct_held is not None:
+                    pct = holders.institutions_pct_held * 100
+                    across = (f" ({holders.institutions_count:,} גופים)"
+                              if holders.institutions_count else "")
+                    st.markdown(f"**{pct:.1f}%** מהמניות מוחזקות בידי מוסדיים{across}.")
+                if holders.top_holders:
+                    table = pd.DataFrame([{
+                        "Holder": h.name,
+                        "Shares": f"{h.shares:,}" if h.shares is not None else "—",
+                        "% held": (f"{h.pct_held * 100:.2f}%"
+                                   if h.pct_held is not None else "—"),
+                        "Date reported": h.date_reported or "—",
+                    } for h in holders.top_holders])
+                    st.dataframe(table, hide_index=True, width="stretch")
+                st.caption("מדוחות **13F** רבעוניים (באיחור של עד כ-45 יום), בעיקר מנהלי "
+                           "השקעות גדולים כמו Vanguard ו-BlackRock. לא ייעוץ השקעות.")
+
+        # Famous investors (real SEC 13F data; button-triggered so we never
+        # run ~10 EDGAR calls on page load). Cached per symbol for the session.
+        with st.expander("משקיעים מפורסמים", expanded=False):
+            famous_cache = st.session_state.setdefault("_famous_cache", {})
+            requested = st.session_state.setdefault("_famous_requested", set())
+            if st.button("בדוק משקיעים מפורסמים", key="famous_btn"):
+                requested.add(symbol)
+
+            if symbol in requested:
+                if symbol not in famous_cache:
+                    with st.spinner("בודק דוחות 13F ב-SEC…"):
+                        try:
+                            famous_cache[symbol] = famous_investors.get_famous_holders(
+                                symbol, get_edgar_identity())
+                        except Exception:
+                            famous_cache[symbol] = None  # error sentinel
+                famous = famous_cache[symbol]
+
+                if famous is None:
+                    st.caption("_הנתונים על משקיעים מפורסמים לא זמינים כרגע._")
+                elif famous:
+                    ftable = pd.DataFrame([{
+                        "Investor": h["name"],
+                        "Fund": h["fund"],
+                        "Shares": (f"{h['shares']:,.0f}"
+                                   if h.get("shares") is not None else "—"),
+                        "Value": (f"{h['value']:,.0f}"
+                                  if h.get("value") is not None else "—"),
+                        "% of portfolio": (
+                            f"{h['pct_of_portfolio']:.1f}%"
+                            if h.get("pct_of_portfolio") is not None else "—"),
+                        "vs last filing": _famous_change_str(h),
+                        "As of": h.get("period") or "—",
+                    } for h in famous])
+                    st.dataframe(ftable, hide_index=True, width="stretch")
+                    st.caption("מדוחות **13F** של ה-SEC (באיחור של עד כ-45 יום), מניות "
+                               "אמריקאיות בלבד, מתוך רשימה של כ-10 משקיעים. לא ייעוץ השקעות.")
                 else:
-                    if holders.institutions_pct_held is not None:
-                        pct = holders.institutions_pct_held * 100
-                        across = (f" ({holders.institutions_count:,} גופים)"
-                                  if holders.institutions_count else "")
-                        st.markdown(f"**{pct:.1f}%** מהמניות מוחזקות על ידי גופים "
-                                    f"מוסדיים{across}.")
+                    st.caption("_אף אחד מהמשקיעים ברשימה לא מחזיק במניה הזו "
+                               "(או שהיא לא נסחרת בארה״ב)._")
+            else:
+                st.caption("בדיקה מול כ-10 משקיעים ידועים (באפט, אקמן, ברי ועוד) לפי "
+                           "דוח ה-13F האחרון שלהם. מניות אמריקאיות בלבד.")
 
-                    if holders.top_holders:
-                        table = pd.DataFrame([{
-                            "מחזיק": h.name,
-                            "מניות": f"{h.shares:,}" if h.shares is not None else MISSING,
-                            "% מוחזק": (f"{h.pct_held * 100:.2f}%"
-                                        if h.pct_held is not None else MISSING),
-                            "תאריך דיווח": h.date_reported or MISSING,
-                        } for h in holders.top_holders])
-                        st.dataframe(table, hide_index=True, width="stretch")
-                        st.caption(
-                            "המחזיקים המוסדיים הגדולים לפי דוחות **13F** רבעוניים "
-                            "(באיחור של עד כ-45 יום), בעיקר מנהלי השקעות גדולים "
-                            "(כמו Vanguard ו-BlackRock). זה **לא** בזמן אמת, ו**לא "
-                            "ייעוץ השקעות**."
-                        )
+        with st.expander("פעולות אנליסטים אחרונות", expanded=False):
+            if (analyst is not None and analyst.found
+                    and getattr(analyst, "actions", None)):
+                for a in analyst.actions:
+                    verb = engine.humanize_action(a["action"])
+                    if a["from_grade"] and a["from_grade"] != a["to_grade"]:
+                        grade = f"{a['from_grade']} -> {a['to_grade']}"
                     else:
-                        # Summary % available but no named-holder breakdown (common
-                        # for smaller / foreign listings).
-                        st.caption(
-                            "סיכום האחזקה המוסדית לפי דוחות **13F** רבעוניים (באיחור "
-                            "של עד כ-45 יום). פירוט לפי שמות לא זמין למניה הזו. **לא "
-                            "ייעוץ השקעות**."
-                        )
+                        grade = a["to_grade"] or "-"
+                    target = (f" · target {a['price_target']:,.0f}"
+                              if a.get("price_target") else "")
+                    st.write(f"- **{a['date']}** {a['firm']}: {verb} ({grade}){target}")
+            else:
+                st.caption("_אין פעולות אנליסטים אחרונות._")
 
-            # Famous investors (real SEC 13F data; button-triggered so we never
-            # run ~10 EDGAR calls on page load). Cached per symbol for the session.
-            with st.expander("משקיעים מפורסמים שמחזיקים", expanded=False):
-                famous_cache = st.session_state.setdefault("_famous_cache", {})
-                requested = st.session_state.setdefault("_famous_requested", set())
-                if st.button("בדוק משקיעים מפורסמים", key="famous_btn"):
-                    requested.add(symbol)
-
-                if symbol in requested:
-                    if symbol not in famous_cache:
-                        with st.spinner("בודק דוחות 13F ב-SEC…"):
-                            try:
-                                famous_cache[symbol] = famous_investors.get_famous_holders(
-                                    symbol, get_edgar_identity())
-                            except Exception:
-                                famous_cache[symbol] = None  # error sentinel
-                    famous = famous_cache[symbol]
-
-                    if famous is None:
-                        st.caption("_הנתונים על משקיעים מפורסמים לא זמינים כרגע._")
-                    elif famous:
-                        ftable = pd.DataFrame([{
-                            "משקיע": h["name"],
-                            "קרן": h["fund"],
-                            "מניות": (f"{h['shares']:,.0f}"
-                                      if h.get("shares") is not None else MISSING),
-                            "שווי": (f"{h['value']:,.0f}"
-                                     if h.get("value") is not None else MISSING),
-                            "% מהתיק": (
-                                f"{h['pct_of_portfolio']:.1f}%"
-                                if h.get("pct_of_portfolio") is not None else MISSING),
-                            "מול הדוח הקודם": _famous_change_str(h),
-                            "נכון ל": h.get("period") or MISSING,
-                        } for h in famous])
-                        st.dataframe(ftable, hide_index=True, width="stretch")
-                        st.caption(
-                            "לפי דוחות **13F** רבעוניים ב-SEC (באיחור של עד כ-45 יום), "
-                            "**מניות אמריקאיות בלבד**, מתוך רשימה של כ-10 משקיעים. לא "
-                            "רשימה מלאה, לא בזמן אמת, ו**לא ייעוץ השקעות**. **% מהתיק** "
-                            "ו**מול הדוח הקודם** מחושבים משני הדוחות האחרונים של כל קרן."
-                        )
-                    else:
-                        st.caption("_אף אחד מהמשקיעים שבמעקב לא מדווח על אחזקה "
-                                   "(או שזו לא מניה אמריקאית)._")
-                else:
-                    st.caption("בדיקה של כ-10 משקיעים מוכרים (באפט, אקמן, ברי…) "
-                               "מול דוח ה-13F האחרון שלהם. מניות אמריקאיות בלבד.")
-
-            with st.expander("שינויי המלצות אחרונים של אנליסטים",
-                             expanded=False):
-                if (analyst is not None and analyst.found
-                        and getattr(analyst, "actions", None)):
-                    for a in analyst.actions:
-                        verb = engine.humanize_action(a["action"])
-                        if a["from_grade"] and a["from_grade"] != a["to_grade"]:
-                            grade = f"{a['from_grade']} -> {a['to_grade']}"
-                        else:
-                            grade = a["to_grade"] or "-"
-                        target = (f" · יעד {a['price_target']:,.0f}"
-                                  if a.get("price_target") else "")
-                        st.write(f"- **{a['date']}** {a['firm']}: {verb} "
-                                 f"({grade}){target}")
-                else:
-                    st.caption("_אין שינויי המלצות אחרונים._")
-
-        # Debug panel (mockup item 8): hidden unless the URL has ?debug=1.
-        # Open it to see WHICH source gave us the price and every raw value.
-        if debug_enabled():
-            with st.expander("🔧 Debug", expanded=False):
+        # Debug panel: hidden unless the address ends with ?debug=1.
+        if st.query_params.get("debug") == "1":
+            with st.expander("🔧 Debug details", expanded=False):
                 st.write(f"**Price came from:** `{quote.price_source}`")
-                st.write(
-                    f"**Previous close came from:** "
-                    f"`{quote.prev_source or 'not available'}`"
-                )
+                st.write(f"**Previous close came from:** "
+                         f"`{quote.prev_source or 'not available'}`")
                 st.write("**Price candidates tried:**")
                 st.write(quote.sources.get("price_candidates", {}))
                 st.write("**Previous-close candidates tried:**")
                 st.write(quote.sources.get("prev_candidates", {}))
-                # Which fundamentals path supplied the company metrics (Part A).
                 if company is not None and getattr(company, "source_note", ""):
                     st.write(f"**Company fundamentals via:** `{company.source_note}`")
 

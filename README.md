@@ -67,14 +67,16 @@ debt. The formula and its knobs are at the top of `rank.py`.
 The daily run that does all of this automatically is described under
 **Daily automatic run** below.
 
-## Look & feel (redesign Stage 2)
+## Look & feel (redesign, mockup "המניות שלי – הדמיה")
 
-Dark theme + Hebrew right-to-left interface, following the mockup
-"המניות שלי – הדמיה": `.streamlit/config.toml` (colors, committed) plus a small
-CSS block at the top of `app.py`. Six key metrics up front (the rest under
-"כל הנתונים"), missing values shown as "—", a clean green/red line chart
-(candles and % stay available), and the Debug panel only with `?debug=1` in
-the URL. Signal breakdowns from the engine are still in English.
+Dark theme + Hebrew right-to-left, iPhone-first. The home screen "המניות שלי"
+has the search box and the watchlist (and, from Stage 3, the portfolio). A
+stock opens as one scroll: header, green/red chart, the "bottom line" card,
+Wall Street, 6 key numbers, then collapsed sections (AI, all data,
+technicals, holders). Missing values show "—"; the Debug panel appears only
+with `?debug=1`. Colors live in `.streamlit/config.toml`, the layout CSS at
+the top of `app.py`. Some engine texts (signal names, tooltips) are still
+English.
 
 ## Run it locally
 
@@ -159,3 +161,15 @@ The GitHub Actions workflow that runs it every morning is kept as a template in
 `deploy/stock-app-data/`. It is meant for the private data repo and is **not**
 active in this public repo (GitHub only runs workflows under `.github/`).
 `keep_awake.py` (used by that workflow) visits the live app so it isn't asleep.
+
+## Working on the look offline
+
+`dev/demo_app.py` runs the real `app.py` with made-up sample data (AAPL, NVDA,
+TEVA.TA), so you can see and screenshot the UI without internet access:
+
+```bash
+streamlit run dev/demo_app.py
+```
+
+The colors live in `.streamlit/config.toml` (committed); the Hebrew
+right-to-left layout and the small cards are CSS at the top of `app.py`.
