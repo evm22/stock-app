@@ -329,15 +329,22 @@ def remove_manual(data, manual_id):
     return new
 
 
-def manual_row(m):
-    """A portfolio row (same keys as position()) for a hand-valued holding."""
-    value, cost = m["value"], m["cost"]
+def manual_row(m, factor=1.0, day_pct=None):
+    """A portfolio row (same keys as position()) for a hand-valued holding.
+    factor = how its index moved since the manual update (valuation.index_move),
+    so the value stays current between updates; day_pct = today's move."""
+    typed, cost = m["value"], m["cost"]
+    value = typed * (factor if _num(factor) and factor > 0 else 1.0)
+    day = None
+    if _num(day_pct) and day_pct > -100:
+        day = value - value / (1 + day_pct / 100)
     return {"symbol": MANUAL_PREFIX + m["id"], "qty": None, "cost": cost,
             "currency": HOME_CURRENCY, "price": None,
             "value": value, "pnl": value - cost,
-            "pnl_pct": (value / cost - 1) * 100 if cost > 0 else None, "day": None,
-            "value_home": value, "cost_home": cost, "day_home": None,
-            "manual": True, "name": m["name"], "updated": m["updated"]}
+            "pnl_pct": (value / cost - 1) * 100 if cost > 0 else None, "day": day,
+            "value_home": value, "cost_home": cost, "day_home": day,
+            "manual": True, "name": m["name"], "updated": m["updated"],
+            "typed_value": typed, "estimated": abs(value - typed) > 0.005}
 
 
 def is_manual(symbol):

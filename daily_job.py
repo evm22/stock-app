@@ -14,7 +14,12 @@ What it does, in order:
      later whether the picks worked).
   5. Writes data/last_run.json and a one-line Hebrew summary
      data/last_summary.txt.
-  6. Builds the Hebrew Telegram message (top 10, who entered / left the top
+  6. My portfolio (data/portfolio.json, when there is one): scores every stock
+     I hold / my funds follow / I watch -> data/holding_scores.json (the app's
+     home screen reads it instead of computing them live), and puts a personal
+     part at the top of the message (my total, the day, movers, this week's
+     reports / dividends, big score changes).
+  7. Builds the Hebrew Telegram message (top 10, who entered / left the top
      vs the previous run, top Israeli stocks), optionally holds it until
      --send-at, and sends it IF a bot is configured (see notify.py:
      env TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID, or .streamlit/secrets.toml).
@@ -56,6 +61,9 @@ SUMMARY_PATH = "data/last_summary.txt"
 RANKED_LATEST_PATH = "data/ranked/latest.json"
 RANKED_DAY_PATH = "data/ranked/{day}.json"
 AI_PICKS_PATH = "data/ai_picks.json"   # "ה-AI ממליץ" (read by the app)
+HOLDING_SCORES_PATH = "data/holding_scores.json"   # my stocks' scores + calendar (app)
+PORTFOLIO_PATH = "data/portfolio.json"
+WATCHLIST_PATH = "data/watchlist.json"
 
 HORIZON = "1y"           # horizon used for the daily ranking
 TOP_N = 10               # stocks listed in the message
@@ -257,6 +265,122 @@ def picks_lines(picks):
 # Telegram (optional)
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# My portfolio: scores for the app (fast home screen) + the personal message
+# ---------------------------------------------------------------------------
+
+class Fetchers:
+    """Network calls for the portfolio part (tests pass fakes)."""
+
+    def __init__(self):
+        import engine
+        import events
+        self.engine, self.events = engine, events
+
+    def quote(self, sym):
+        return self.engine.get_stock_quote(sym)
+
+    def verdict(self, sym):
+        return self.engine.compute_verdict(sym)
+
+    def analyst(self, sym):
+        return self.engine.get_analyst_consensus(sym)
+
+    def history(self, sym):
+        return self.engine.get_price_history(sym, "1Y")
+
+    def calendar(self, sym):
+        return self.events.fetch_calendar(sym)
+
+
+def portfolio_part(data_dir, today, fetch=None):
+    """
+    Score every stock I hold / my funds follow / I watch, save them for the app
+    (data/holding_scores.json: the home screen reads these instead of computing
+    20+ scores live), and build the personal lines of the morning message.
+    -> lines (list of str; [] when there's no portfolio). Never raises.
+    """
+    import buy_score
+    import events
+    import portfolio
+    import valuation
+    try:
+        data = data_store.read_json(PORTFOLIO_PATH, default=None, local_dir=data_dir)
+        if not data:
+            return []
+        data = portfolio.clean_data(data)
+        watch = data_store.read_json(WATCHLIST_PATH, default=[], local_dir=data_dir) or []
+        fetch = fetch or Fetchers()
+        syms = valuation.symbols_to_score(data, watch)
+
+        quotes = {}
+        for sym in syms:
+            try:
+                quotes[sym] = fetch.quote(sym)
+            except Exception:
+                quotes[sym] = None
+
+        def quote_fn(sym):
+            q = quotes.get(sym)
+            if q is None:
+                try:
+                    q = quotes[sym] = fetch.quote(sym)
+                except Exception:
+                    return None
+            if not (q and q.found):
+                return None
+            price, cur = portfolio.to_major(q.price, q.currency)
+            return price, q.change_pct, cur, q.name
+
+        fx_cache = {}
+
+        def fx_fn(cur):
+            sym = portfolio.fx_symbol(cur)
+            if sym is None:
+                return 1.0
+            if cur not in fx_cache:
+                q = quote_fn(sym)
+                fx_cache[cur] = q[0] if q else None
+            return fx_cache[cur]
+
+        def closes_fn(sym):
+            q = quotes.get(sym)
+            try:
+                return valuation.closes_major(fetch.history(sym), q.currency if q else "")
+            except Exception:
+                return []
+
+        previous = data_store.read_json(HOLDING_SCORES_PATH, default={}, local_dir=data_dir) or {}
+        scores, calendars = {}, {}
+        for sym in syms:
+            try:
+                sc = buy_score.from_engine_objects(fetch.verdict(sym), fetch.analyst(sym))
+                parts = {p["key"]: p["value"] for p in sc["parts"]}
+                scores[sym] = {"engine": parts.get("engine"), "analysts": parts.get("analysts"),
+                               "score": sc["score"]}
+            except Exception:
+                pass
+            try:
+                calendars[sym] = fetch.calendar(sym)
+            except Exception:
+                pass
+        data_store.write_json(HOLDING_SCORES_PATH, {
+            "date": today, "generated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            "scores": scores, "calendar": calendars}, local_dir=data_dir)
+
+        rows, names = valuation.value_rows(data, quote_fn, fx_fn, closes_fn)
+        held = {h["symbol"]: h["qty"] for h in portfolio.as_holdings(portfolio.compute(data))}
+        week = events.upcoming({s: calendars.get(s) for s in held}, held)
+        old = {s: (v or {}).get("score") for s, v in (previous.get("scores") or {}).items()} \
+            if previous.get("date") != today else {}
+        changes = valuation.score_changes(old, {s: scores[s]["score"] for s in held if s in scores},
+                                          names)
+        return valuation.telegram_lines(rows, names, week, changes)
+    except Exception as exc:
+        print(f"portfolio part: failed ({type(exc).__name__}: {exc})")
+        return []
+
+
 def send_telegram(text):
     """Send `text` via notify.py if a bot is configured. Never raises."""
     try:
@@ -286,7 +410,7 @@ def _resume_today(results_file, today):
 
 
 def run(data_dir, limit=None, force=False, now_utc=None, scan_fn=None, universe=None,
-        send_at=None, dry_run=False):
+        send_at=None, dry_run=False, fetch=None):
     """
     Do the daily run. Returns the last_run dict, or None if the guard skipped.
     `scan_fn` / `universe` are injectable so tests never touch the network.
@@ -357,8 +481,12 @@ def run(data_dir, limit=None, force=False, now_utc=None, scan_fn=None, universe=
     data_store.write_json(AI_PICKS_PATH, picks, local_dir=data_dir)
     last_run["ai_picks"] = picks["source"]
 
+    mine = portfolio_part(data_dir, today, fetch=fetch)
+    last_run["portfolio_lines"] = len(mine)
     message = build_message(rows, ranked, diff_top(ranked, previous), today,
                             complete=result.get("complete", True))
+    if mine:   # my portfolio first, then the market scan
+        message = "\n".join(mine) + "\n\n" + message
     extra = picks_lines(picks)
     if extra:  # before the two footer lines (formula + disclaimer)
         lines = message.split("\n")

@@ -31,13 +31,14 @@ import news  # latest headlines from free sources (Yahoo, Google News RSS)
 import ai_insights  # numbers behind the AI overview / picks (pure Python)
 import benchmark  # portfolio vs TA-125 / S&P 500 with the same money on the same days
 import events  # this week's earnings reports and dividends (Yahoo calendar)
+import valuation  # what the portfolio is worth now (shared with the morning message)
 
 # Streamlit Cloud updates the files on a push but keeps the modules above in
 # memory, so new code in portfolio.py etc. was missing until a manual reboot
 # (AttributeError: no merge_watchlists). Reload a module when its file changed.
 import importlib  # noqa: E402
 
-for _mod in (data_store, portfolio, buy_score, news, ai_insights, benchmark, events,
+for _mod in (data_store, portfolio, valuation, buy_score, news, ai_insights, benchmark, events,
              gemini_helper, famous_investors, engine):
     try:
         _mtime = os.path.getmtime(_mod.__file__)
@@ -927,22 +928,38 @@ def load_fx(currency):
         return None
 
 
-def portfolio_rows(holdings):
-    """Value every holding with live quotes + FX. Returns (rows, names)."""
-    rows, names = [], {}
-    for h in holdings:
-        price = currency = change = None
+@st.cache_data(ttl=600, show_spinner=False)
+def load_quotes(symbols):
+    """Many quotes at once, in parallel (one by one, 23 holdings took seconds).
+    symbols: a tuple. -> {symbol: StockQuote or None}"""
+    from concurrent.futures import ThreadPoolExecutor
+
+    def one(sym):
         try:
-            q = load_quote(h["symbol"])
-            if q and q.found:
-                price, currency = portfolio.to_major(q.price, q.currency)
-                change = q.change_pct
-                names[h["symbol"]] = short_name(q.name, h["symbol"])
+            return sym, engine.get_stock_quote(sym)
         except Exception:
-            pass
-        fx = load_fx(currency) if currency else None
-        rows.append(portfolio.position(h, price, currency or "", change, fx))
-    return rows, names
+            return sym, None
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        return dict(pool.map(one, symbols))
+
+
+def portfolio_rows(data):
+    """Value every holding (and hand-valued fund) with live quotes + FX, through
+    valuation.value_rows (the same code the morning message uses)."""
+    try:
+        held = [h["symbol"] for h in portfolio.as_holdings(portfolio.compute(data))]
+    except portfolio.PortfolioError:
+        held = []
+    tracked = [t for m in data.get("manual", []) for t in portfolio.tracks_of(m)]
+    quotes = load_quotes(tuple(dict.fromkeys(held + tracked)))
+
+    def quote_fn(sym):
+        q = quotes.get(sym)
+        if not (q and q.found):
+            return None
+        price, cur = portfolio.to_major(q.price, q.currency)
+        return price, q.change_pct, cur, short_name(q.name, sym)
+    return valuation.value_rows(data, quote_fn, load_fx, load_closes)
 
 
 def portfolio_card_html(totals):
@@ -1209,19 +1226,7 @@ def chip_html(value, suffix=""):
     return f'<span class="sa-chip {cls}">{value:+.2f}{suffix}</span>'
 
 
-_NAME_SUFFIXES = (", Inc.", " Inc.", " Inc", " Corporation", " Corp.", " Corp", " Limited",
-                  " Ltd.", " Ltd", " plc", " PLC", " N.V.", " S.A.", " AG", " SE",
-                  " Holdings", " Industries", " Group", " Co.", " Company", " B.M.")
-
-
-def short_name(name, symbol=""):
-    """'Teva Pharmaceutical Industries Limited' -> 'Teva Pharmaceutical'."""
-    name = (name or "").strip() or symbol
-    for _ in range(3):
-        for suf in _NAME_SUFFIXES:
-            if name.endswith(suf) and len(name) > len(suf) + 2:
-                name = name[: -len(suf)].rstrip(" ,&")
-    return name
+short_name = valuation.short_name   # one implementation (the morning message uses it too)
 
 
 def display_price(price, currency):
@@ -1419,13 +1424,8 @@ def render_portfolio_home():
                    "קנייה: כמה מניות, באיזה מחיר ומתי.")
         render_manual_box(data)
         return
-    rows, names = portfolio_rows(holdings)
-    manual_scores = {}
-    for m in manual:
-        r = portfolio.manual_row(m)
-        rows.append(r)
-        names[r["symbol"]] = m["name"]
-        manual_scores[r["symbol"]] = score_for_manual(m)
+    rows, names = portfolio_rows(data)
+    manual_scores = {portfolio.MANUAL_PREFIX + m["id"]: score_for_manual(m) for m in manual}
     st.markdown(portfolio_card_html(portfolio.summarize(rows)), unsafe_allow_html=True)
     if holdings:
         render_week_events(holdings, names)
@@ -1433,7 +1433,8 @@ def render_portfolio_home():
         for r in rows:
             sym = r["symbol"]
             if r.get("manual"):
-                label = (f"**{md_safe(r['name'])}**{score_tag(manual_scores.get(sym))}\nשווי ידני · "
+                how = "מוערך לפי המדד" if r.get("estimated") else "שווי ידני"
+                label = (f"**{md_safe(r['name'])}**{score_tag(manual_scores.get(sym), 'מגמה')}\n{how} · "
                          f"\u2066{md_safe(portfolio.money(r['value'], 'ILS', 0))}\u2069")
                 if r["pnl_pct"] is not None:
                     color = "green" if r["pnl_pct"] >= 0 else "red"
@@ -1450,7 +1451,7 @@ def render_portfolio_home():
                 label += f" · :{color}[\u2066{r['pnl_pct']:+.1f}%\u2069]"
             st.button(label, key=f"pf_view_{sym}", on_click=_goto, args=(sym,),
                       width="stretch")
-    render_manual_box(data)
+    render_manual_box(data, {r["symbol"]: r for r in rows if r.get("manual")})
     render_portfolio_overview(rows, names, data,
                               {k: v["score"] for k, v in manual_scores.items() if v})
 
@@ -1461,7 +1462,7 @@ def _edit_manual(manual_id):
     st.session_state["manual_pick"] = manual_id
 
 
-def render_manual_box(data):
+def render_manual_box(data, rows=None):
     """Add / update / remove holdings that have no price in the free data."""
     manual = data.get("manual", [])
     picked = st.session_state.get("manual_pick")
@@ -1475,7 +1476,15 @@ def render_manual_box(data):
             pick = st.selectbox("עדכון נכס", ids, index=ids.index(picked) if picked in ids else 0,
                                 format_func=lambda i: by_id[i]["name"], key="manual_select")
             m = by_id[pick]
-            st.caption(f"עודכן לאחרונה ב-\u2066{date.fromisoformat(m['updated']):%d.%m.%Y}\u2069")
+            when = f"\u2066{date.fromisoformat(m['updated']):%d.%m.%Y}\u2069"
+            row = (rows or {}).get(portfolio.MANUAL_PREFIX + pick)
+            if row and row.get("estimated"):
+                st.caption(f"הזנת \u2066{md_safe(portfolio.money(m['value'], 'ILS', 0))}\u2069 ב-{when}. "
+                           f"מאז השווי מוערך לפי השינוי במדד: \u2066{md_safe(portfolio.money(row['value'], 'ILS', 0))}\u2069 "
+                           "(בלי שינויי שער מטבע). כשתזין שווי חדש מהברוקר, ההערכה תתחיל ממנו.")
+            else:
+                st.caption(f"עודכן לאחרונה ב-{when}. מעכשיו השווי יתעדכן לבד לפי השינוי במדד "
+                           "שהקרן עוקבת אחריו.")
             with st.form(f"manual_edit_{pick}", border=False):
                 c1, c2 = st.columns(2)
                 value = c1.number_input("שווי עכשיו (₪)", min_value=0.0, value=float(m["value"]),
@@ -1493,9 +1502,10 @@ def render_manual_box(data):
                 saved = st.form_submit_button("שמור עדכון", type="primary", width="stretch")
             ms = score_for_manual(m)
             if ms:
-                st.caption(f"הציון \u2066{ms['score']:+d}\u2069 הוא הציון של המדד שהקרן עוקבת אחריו "
+                st.caption(f"המגמה \u2066{ms['score']:+d}\u2069 היא הציון של המדד שהקרן עוקבת אחריו "
                            + ("(ממוצע של הבנקים במדד). " if ms["count"] > 1 else ". ")
-                           + "למדד אין דוחות כספיים, אז הציון מבוסס על המגמה והמומנטום של המחיר.")
+                           + "למדד אין דוחות כספיים, אז זה ציון של מגמת המחיר והמומנטום בלבד (טווח קצר), "
+                           "ולא ציון קנייה כמו של מניה.")
             if saved:
                 try:
                     update_portfolio(lambda d: portfolio.update_manual(d, pick, value, cost,
@@ -1545,7 +1555,7 @@ def load_calendar(symbol):
 def render_week_events(holdings, names):
     """Earnings reports and dividends in the next 7 days, at the top of home."""
     qty = {h["symbol"]: h["qty"] for h in holdings}
-    cals = {sym: load_calendar(sym) for sym in qty}
+    cals = {sym: nightly("calendar", sym) or load_calendar(sym) for sym in qty}
     items = events.upcoming(cals, qty)
     with st.container(border=True, key="week_events"):
         st.markdown('<h4 style="margin:0">השבוע בתיק <span class="sa-sub" '
@@ -1658,14 +1668,9 @@ BENCH_LABELS = {v["name"]: k for k, v in benchmark.INDEXES.items()}
 def load_closes(symbol):
     """One year of daily closes in the MAJOR unit: [(iso_date, close)], or []."""
     try:
-        h = load_history(symbol, "1Y")
-        if not h.found:
-            return []
         q = load_quote(symbol)
-        df = major_history(h.data, q.currency if (q and q.found) else "")
-        df = df[["Date", "Close"]].dropna()
-        return [(pd.Timestamp(t).date().isoformat(), float(c))
-                for t, c in zip(df["Date"], df["Close"])]
+        return valuation.closes_major(load_history(symbol, "1Y"),
+                                      q.currency if (q and q.found) else "")
     except Exception:
         return []
 
@@ -1841,8 +1846,41 @@ def _run_ai_news(symbol, name):
         st.session_state["_ai_news_failed"] = symbol
 
 
+NIGHTLY_SCORES_PATH = "data/holding_scores.json"   # written by daily_job.py
+NIGHTLY_MAX_AGE_DAYS = 2
+
+
+@st.cache_data(ttl=1800, show_spinner=False)
+def _nightly_doc():
+    try:
+        return data_store.read_json(NIGHTLY_SCORES_PATH, {}, **_store_kwargs()) or {}
+    except data_store.DataStoreError:
+        return {}
+
+
+def nightly(kind, symbol):
+    """This morning's precomputed 'scores' / 'calendar' entry for a symbol, or
+    None when there's none or it's older than NIGHTLY_MAX_AGE_DAYS."""
+    doc = _nightly_doc()
+    try:
+        age = (date.today() - date.fromisoformat(doc.get("date", ""))).days
+    except ValueError:
+        return None
+    if age > NIGHTLY_MAX_AGE_DAYS:
+        return None
+    return (doc.get(kind) or {}).get(symbol)
+
+
 def score_for(symbol, verdict=None, analyst=None):
-    """The buy score dict for a symbol (loads verdict/analyst if not given)."""
+    """The buy score dict for a symbol. Lists use this morning's precomputed
+    engine + analyst parts (fast); the stock page passes its live verdict /
+    analyst, and anything not precomputed is computed live."""
+    if verdict is None and analyst is None:
+        pre = nightly("scores", symbol)
+        if pre:
+            ai = ai_news_rating(symbol)
+            return buy_score.combine(pre.get("engine"), pre.get("analysts"),
+                                     ai["score"] if ai else None)
     try:
         verdict = verdict if verdict is not None else load_verdict(symbol)
     except Exception:
@@ -1867,12 +1905,13 @@ def score_for_manual(m):
     return {"score": n, "cls": cls, "of": syms, "count": len(vals)}
 
 
-def score_tag(score):
-    """' · ציון +34' (colored) for list rows, or '' when there is no score."""
+def score_tag(score, word="ציון"):
+    """' · ציון +34' (colored) for list rows, or '' when there is no score.
+    Funds say 'מגמה': an index's score is price trend only, not a buy score."""
     if not score or score["score"] is None:
         return ""
     color = {"up": "green", "down": "red"}.get(score["cls"], "orange")
-    return f" · :{color}[ציון \u2066{score['score']:+d}\u2069]"
+    return f" · :{color}[{word} \u2066{score['score']:+d}\u2069]"
 
 
 PART_NAMES = {"engine": ("המנוע שלנו", "16 סימנים מהנתונים, תחזית לשנה"),
