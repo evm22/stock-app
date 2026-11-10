@@ -1397,16 +1397,32 @@ def render_portfolio_home():
     except portfolio.PortfolioError as exc:
         st.error(f"יש בעיה ברשימת העסקאות: {exc}")
         return
-    if not holdings:
+    manual = data.get("manual", [])
+    if not holdings and not manual:
         st.caption("עוד אין מניות בתיק. פתח מניה ולחץ **הוספה לתיק** כדי לרשום "
                    "קנייה: כמה מניות, באיזה מחיר ומתי.")
+        render_manual_box(data)
         return
     rows, names = portfolio_rows(holdings)
+    for m in manual:
+        r = portfolio.manual_row(m)
+        rows.append(r)
+        names[r["symbol"]] = m["name"]
     st.markdown(portfolio_card_html(portfolio.summarize(rows)), unsafe_allow_html=True)
-    render_week_events(holdings, names)
+    if holdings:
+        render_week_events(holdings, names)
     with st.container(key="portfolio_rows"):
         for r in rows:
             sym = r["symbol"]
+            if r.get("manual"):
+                label = (f"**{md_safe(r['name'])}**\nשווי ידני · "
+                         f"\u2066{md_safe(portfolio.money(r['value'], 'ILS', 0))}\u2069")
+                if r["pnl_pct"] is not None:
+                    color = "green" if r["pnl_pct"] >= 0 else "red"
+                    label += f" · :{color}[\u2066{r['pnl_pct']:+.1f}%\u2069]"
+                st.button(label, key=f"pf_manual_{sym}", on_click=_edit_manual,
+                          args=(sym[len(portfolio.MANUAL_PREFIX):],), width="stretch")
+                continue
             qty = f"{r['qty']:,.4g}"
             label = f"**{md_safe(names.get(sym, sym))}**{score_tag(score_for(sym))}\n\u2066{qty}\u2069 מניות"
             if r["value"] is not None:
@@ -1416,7 +1432,74 @@ def render_portfolio_home():
                 label += f" · :{color}[\u2066{r['pnl_pct']:+.1f}%\u2069]"
             st.button(label, key=f"pf_view_{sym}", on_click=_goto, args=(sym,),
                       width="stretch")
+    render_manual_box(data)
     render_portfolio_overview(rows, names, data)
+
+
+# --- Holdings with a value typed by hand (Israeli funds etc.) -------------
+
+def _edit_manual(manual_id):
+    st.session_state["manual_pick"] = manual_id
+
+
+def render_manual_box(data):
+    """Add / update / remove holdings that have no price in the free data."""
+    manual = data.get("manual", [])
+    picked = st.session_state.get("manual_pick")
+    with st.expander("✏️ קרנות ונכסים בלי מחיר אוטומטי", expanded=bool(picked)):
+        st.caption("לקרנות נאמנות וקרנות מחקות ישראליות אין מחירים במקור הנתונים "
+                   "החינמי. אפשר להזין אותן כאן לפי מה שרואים אצל הברוקר: שם, שווי "
+                   "עכשיו ועלות, בשקלים. הן נספרות בשווי התיק, ואת השווי מעדכנים ידנית.")
+        if manual:
+            ids = [m["id"] for m in manual]
+            by_id = {m["id"]: m for m in manual}
+            pick = st.selectbox("עדכון נכס", ids, index=ids.index(picked) if picked in ids else 0,
+                                format_func=lambda i: by_id[i]["name"], key="manual_select")
+            m = by_id[pick]
+            st.caption(f"עודכן לאחרונה ב-\u2066{date.fromisoformat(m['updated']):%d.%m.%Y}\u2069")
+            with st.form(f"manual_edit_{pick}", border=False):
+                c1, c2 = st.columns(2)
+                value = c1.number_input("שווי עכשיו (₪)", min_value=0.0, value=float(m["value"]),
+                                        step=100.0, key=f"manual_value_{pick}")
+                cost = c2.number_input("עלות (₪)", min_value=0.0, value=float(m["cost"]),
+                                       step=100.0, key=f"manual_cost_{pick}")
+                saved = st.form_submit_button("שמור עדכון", type="primary", width="stretch")
+            if saved:
+                try:
+                    update_portfolio(lambda d: portfolio.update_manual(d, pick, value, cost),
+                                     "Update a hand-valued holding")
+                    st.session_state.pop("manual_pick", None)
+                    st.rerun()
+                except (portfolio.PortfolioError, data_store.DataStoreError) as exc:
+                    st.error(str(exc) if isinstance(exc, portfolio.PortfolioError)
+                             else "השמירה נכשלה (בעיה באחסון). נסה שוב.")
+            if st.button("🗑️ הסר את הנכס הזה", key=f"manual_remove_{pick}"):
+                try:
+                    update_portfolio(lambda d: portfolio.remove_manual(d, pick),
+                                     "Remove a hand-valued holding")
+                    st.session_state.pop("manual_pick", None)
+                    st.rerun()
+                except data_store.DataStoreError:
+                    st.error("המחיקה נכשלה (בעיה באחסון). נסה שוב.")
+            st.divider()
+        st.markdown("**הוספת נכס**")
+        with st.form("manual_add", border=False, clear_on_submit=True):
+            name = st.text_input("שם", placeholder="למשל: הראל מחקה ת״א 35", key="manual_new_name")
+            c1, c2 = st.columns(2)
+            value = c1.number_input("שווי עכשיו (₪)", min_value=0.0, step=100.0, key="manual_new_value")
+            cost = c2.number_input("עלות (₪)", min_value=0.0, step=100.0, key="manual_new_cost",
+                                   help="כמה שילמת. אם אצל הברוקר רואים רק ״שינוי מרכישה״: "
+                                        "השווי פחות השינוי.")
+            added = st.form_submit_button("הוסף לתיק", width="stretch")
+        if added:
+            try:
+                update_portfolio(lambda d: portfolio.add_manual(d, name, value, cost or value),
+                                 "Add a hand-valued holding")
+                st.rerun()
+            except portfolio.PortfolioError as exc:
+                st.error(str(exc))
+            except data_store.DataStoreError:
+                st.error("השמירה נכשלה (בעיה באחסון). נסה שוב.")
 
 
 # --- This week in my portfolio (mockup item 19) ---------------------------
@@ -1480,7 +1563,7 @@ def _run_ai_overview(sig, facts_payload):
 
 def render_portfolio_overview(rows, names, data=None):
     """Facts computed in code + (on request) AI strengths / weaknesses / ideas."""
-    scores = {r["symbol"]: score_for(r["symbol"])["score"] for r in rows}
+    scores = {r["symbol"]: score_for(r["symbol"])["score"] for r in rows if not r.get("manual")}
     facts = ai_insights.portfolio_facts(rows, scores, names)
     if not facts["weights"]:
         return

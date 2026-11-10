@@ -84,7 +84,7 @@ until the private data repo is connected they stay **in the browser on that
 device** (never in a server folder: on Streamlit Cloud that folder is shared
 by everyone with the link and wiped on every redeploy); once `DATA_REPO` +
 token are set they go to `data/portfolio.json` in the private repo through
-`data_store.py`. A portfolio saved by the older qty-only version is turned
+`data_store.py`. Holdings with no price in the free data (Israeli mutual / tracker funds) can be added by hand under **✏️ קרנות ונכסים בלי מחיר אוטומטי**: name, value now and cost in ₪ (`data["manual"]`); they count in the total and the weights, not in scores, events or the index comparison. A portfolio saved by the older qty-only version is turned
 into "opening" trades automatically, once. The watchlist is saved in the
 browser too (in the repo: `data/watchlist.json`). When the repo is connected,
 each device moves what its browser kept into the repo once
@@ -171,6 +171,7 @@ venv\Scripts\python test_buy_score.py    # buy score, news parsing, AI reply par
 venv\Scripts\python test_ai_insights.py  # portfolio facts, AI picks (code fallback), both screens (offline)
 venv\Scripts\python test_benchmark.py    # portfolio vs index (shadow portfolio) + the app block (offline)
 venv\Scripts\python test_events.py       # this week's reports/dividends + the home card (offline)
+venv\Scripts\python test_manual.py      # hand-valued holdings (Israeli funds with no Yahoo price) (offline)
 venv\Scripts\python test_private_repo.py # item 22: browser -> repo move, watchlist in repo, password (offline)
 venv\Scripts\python test_rank.py     # screener ranking + resume, no network
 ```

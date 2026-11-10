@@ -194,6 +194,102 @@ def empty():
     return {"version": 1, "transactions": []}
 
 
+def _with(data, txs):
+    """A new data dict with these trades, keeping the manual holdings."""
+    new = {"version": 1, "transactions": txs}
+    if (data or {}).get("manual"):
+        new["manual"] = list(data["manual"])
+    return new
+
+
+# --- holdings with a value typed by hand ------------------------------------
+#
+# Some things in a real portfolio have no price in the free data (Yahoo):
+# Israeli mutual / tracker funds ("קרן מחקה ת״א 35"), for example. For those
+# the user keeps just a name, what it's worth now and what it cost, in ₪, and
+# updates the value by hand now and then. They count in the totals and the
+# weights, but not in the scores, events or the index comparison (no prices).
+
+MANUAL_PREFIX = "manual:"
+
+
+def _money_value(x, what):
+    try:
+        v = float(x)
+    except (TypeError, ValueError):
+        raise PortfolioError(f"{what} חייב להיות מספר.") from None
+    if v < 0:
+        raise PortfolioError(f"{what} לא יכול להיות שלילי.")
+    return v
+
+
+def _clean_manual(m):
+    try:
+        out = {"id": str(m.get("id") or uuid.uuid4().hex[:10]),
+               "name": str(m["name"]).strip(),
+               "value": _money_value(m["value"], "השווי"),
+               "cost": _money_value(m.get("cost", m["value"]), "העלות"),
+               "updated": _parse_date(m.get("updated") or date.today()).isoformat()}
+    except (KeyError, TypeError, ValueError, AttributeError) as exc:
+        if isinstance(exc, PortfolioError):
+            raise
+        raise PortfolioError("בקובץ יש נכס ידני חסר או לא תקין.") from None
+    if not out["name"]:
+        raise PortfolioError("חסר שם לנכס.")
+    return out
+
+
+def add_manual(data, name, value, cost, today=None):
+    """Return NEW data with a hand-valued holding (₪) added."""
+    m = _clean_manual({"name": name, "value": value, "cost": cost,
+                       "updated": today or date.today()})
+    if any(x["name"] == m["name"] for x in data.get("manual", [])):
+        raise PortfolioError("כבר יש נכס בשם הזה. אפשר לעדכן אותו ברשימה.")
+    new = _with(data, list(data.get("transactions", [])))
+    new["manual"] = list(data.get("manual", [])) + [m]
+    return new
+
+
+def update_manual(data, manual_id, value, cost=None, today=None):
+    """Return NEW data with that holding's value (and maybe cost) updated."""
+    new = _with(data, list(data.get("transactions", [])))
+    out, found = [], False
+    for m in data.get("manual", []):
+        if m["id"] == manual_id:
+            found = True
+            m = _clean_manual({**m, "value": value,
+                               "cost": m["cost"] if cost is None else cost,
+                               "updated": today or date.today()})
+        out.append(m)
+    if not found:
+        raise PortfolioError("הנכס לא נמצא.")
+    new["manual"] = out
+    return new
+
+
+def remove_manual(data, manual_id):
+    new = _with(data, list(data.get("transactions", [])))
+    new["manual"] = [m for m in data.get("manual", []) if m["id"] != manual_id]
+    if not new["manual"]:
+        new.pop("manual")
+    return new
+
+
+def manual_row(m):
+    """A portfolio row (same keys as position()) for a hand-valued holding."""
+    value, cost = m["value"], m["cost"]
+    return {"symbol": MANUAL_PREFIX + m["id"], "qty": None, "cost": cost,
+            "currency": HOME_CURRENCY, "price": None,
+            "value": value, "pnl": value - cost,
+            "pnl_pct": (value / cost - 1) * 100 if cost > 0 else None, "day": None,
+            "value_home": value, "cost_home": cost, "day_home": None,
+            "manual": True, "name": m["name"], "updated": m["updated"]}
+
+
+def is_manual(symbol):
+    return str(symbol).startswith(MANUAL_PREFIX)
+
+
 def _parse_date(value):
     if isinstance(value, date):
         return value
@@ -229,7 +325,7 @@ def add_transaction(data, symbol, side, qty, price, currency, when, today=None):
     tx = {"id": uuid.uuid4().hex[:10], "symbol": symbol, "side": side,
           "qty": qty, "price": price, "currency": (currency or "").upper(),
           "date": when.isoformat()}
-    new = {"version": 1, "transactions": list(data.get("transactions", [])) + [tx]}
+    new = _with(data, list(data.get("transactions", [])) + [tx])
     # Replaying everything catches a sale bigger than the holding at that date.
     compute(new)
     return new
@@ -239,7 +335,7 @@ def remove_transaction(data, tx_id):
     """Return a NEW data dict without that trade. Raises PortfolioError if
     removing it would leave a later sale with nothing to sell."""
     txs = [t for t in data.get("transactions", []) if t.get("id") != tx_id]
-    new = {"version": 1, "transactions": txs}
+    new = _with(data, txs)
     compute(new)
     return new
 
@@ -340,7 +436,7 @@ def from_holdings(data, holdings, currencies, when=None):
                     "qty": float(h["qty"]), "price": float(h["cost"]),
                     "currency": (currencies.get(h["symbol"]) or "").upper(),
                     "date": when, "note": "opening"})
-    new = {"version": 1, "transactions": txs}
+    new = _with(data, txs)
     compute(new)
     return new
 
@@ -377,7 +473,7 @@ def make_backup(data, watchlist, now=None):
     now = now or datetime.now()
     doc = {"kind": BACKUP_KIND, "version": 1,
            "created": now.isoformat(timespec="seconds"),
-           "portfolio": {"version": 1, "transactions": list(data.get("transactions", []))},
+           "portfolio": _with(data, list(data.get("transactions", []))),
            "watchlist": list(watchlist or [])}
     return json.dumps(doc, indent=2, ensure_ascii=False) + "\n"
 
@@ -404,6 +500,11 @@ def clean_data(obj):
     if not isinstance(obj, dict) or not isinstance(obj.get("transactions", []), list):
         raise PortfolioError("רשימת העסקאות השמורה לא תקינה.")
     data = {"version": 1, "transactions": [_clean_tx(t) for t in obj.get("transactions", [])]}
+    manual = obj.get("manual") or []
+    if not isinstance(manual, list):
+        raise PortfolioError("רשימת הנכסים הידניים לא תקינה.")
+    if manual:
+        data["manual"] = [_clean_manual(m) for m in manual]
     compute(data)  # raises if a sale is bigger than the holding
     return data
 
@@ -435,11 +536,11 @@ def parse_backup(text):
         raise PortfolioError("הקובץ הזה לא נראה כמו גיבוי (זה לא JSON).") from None
     if not isinstance(doc, dict) or doc.get("kind") != BACKUP_KIND:
         raise PortfolioError("הקובץ הזה לא נראה כמו גיבוי של האפליקציה.")
-    txs = (doc.get("portfolio") or {}).get("transactions") or []
-    if not isinstance(txs, list):
+    pf = doc.get("portfolio") or {}
+    if not isinstance(pf.get("transactions") or [], list):
         raise PortfolioError("רשימת העסקאות בקובץ לא תקינה.")
-    data = {"version": 1, "transactions": [_clean_tx(t) for t in txs]}
-    compute(data)  # raises if a sale is bigger than the holding
+    data = clean_data({"transactions": pf.get("transactions") or [],
+                       "manual": pf.get("manual") or []})
     wl = doc.get("watchlist") or []
     watchlist = [str(s).strip().upper() for s in wl if str(s).strip()] if isinstance(wl, list) else []
     return data, watchlist
@@ -468,9 +569,14 @@ def merge_trades(saved, incoming):
             t = {**t, "id": uuid.uuid4().hex[:10]}
         ids.add(t["id"])
         extra.append(t)
-    if not extra:
+    names = {m["name"] for m in saved.get("manual", [])}
+    manual = saved.get("manual", []) + [m for m in incoming.get("manual", [])
+                                        if m["name"] not in names]
+    added = len(extra) + len(manual) - len(saved.get("manual", []))
+    if not added:
         return saved, 0
-    return clean_data({"transactions": saved["transactions"] + extra}), len(extra)
+    return clean_data({"transactions": saved["transactions"] + extra,
+                       "manual": manual}), added
 
 
 def merge_watchlists(saved, incoming):
