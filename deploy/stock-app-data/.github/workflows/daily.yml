@@ -97,5 +97,11 @@ jobs:
             echo "No data changes (the time guard skipped this run)."
           else
             git commit -m "daily data $(TZ=Asia/Jerusalem date +%F)"
-            git push
+            # The app saves trades / the watchlist into this repo too, maybe
+            # while the scan ran: take those first, then push (3 tries).
+            for i in 1 2 3; do
+              git pull --rebase -q && git push && exit 0
+              sleep 10
+            done
+            exit 1
           fi

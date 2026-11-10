@@ -5,6 +5,10 @@ repo **private**: it holds your portfolio and trades.
 
 | File | Written by | What it is |
 |---|---|---|
+| `data/portfolio.json` | the app | Your buys and sells (the portfolio is worked out from them) |
+| `data/watchlist.json` | the app | The stocks you follow |
+| `data/ai_picks.json` | daily run | "ה-AI ממליץ": short- and long-term picks |
+| `data/ranked/` | daily run | The ranked list of the day (and `latest.json`) |
 | `data/screen_results.json` | daily run | Today's scan of every stock in the universe |
 | `data/score_history.csv` | daily run | One row per stock per day: scores (0–100) and price. Used for "was the score right?" |
 | `data/last_run.json` | daily run | When the last run happened and how many stocks succeeded |

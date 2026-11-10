@@ -443,3 +443,41 @@ def parse_backup(text):
     wl = doc.get("watchlist") or []
     watchlist = [str(s).strip().upper() for s in wl if str(s).strip()] if isinstance(wl, list) else []
     return data, watchlist
+
+
+def _tx_key(t):
+    return (t["symbol"], t["side"], t["date"], round(t["qty"], 6), round(t["price"], 6))
+
+
+def merge_trades(saved, incoming):
+    """Item 22: the trades kept in a browser move into the private repo.
+    -> (new data, how many trades were added). Trades the repo already has
+    (same stock, side, date, quantity and price) are not added twice, so a
+    second device -- or a second try -- never doubles the portfolio.
+    Raises PortfolioError if the result doesn't add up."""
+    saved = clean_data(saved or empty())
+    incoming = clean_data(incoming or empty())
+    have = {_tx_key(t) for t in saved["transactions"]}
+    ids = {t["id"] for t in saved["transactions"]}
+    extra = []
+    for t in incoming["transactions"]:
+        if _tx_key(t) in have:
+            continue
+        have.add(_tx_key(t))
+        if t["id"] in ids:
+            t = {**t, "id": uuid.uuid4().hex[:10]}
+        ids.add(t["id"])
+        extra.append(t)
+    if not extra:
+        return saved, 0
+    return clean_data({"transactions": saved["transactions"] + extra}), len(extra)
+
+
+def merge_watchlists(saved, incoming):
+    """Union, saved order first; symbols upper-cased, no duplicates."""
+    out = []
+    for s in list(saved or []) + list(incoming or []):
+        s = str(s).strip().upper()
+        if s and s not in out:
+            out.append(s)
+    return out

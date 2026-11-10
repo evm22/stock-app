@@ -86,7 +86,9 @@ by everyone with the link and wiped on every redeploy); once `DATA_REPO` +
 token are set they go to `data/portfolio.json` in the private repo through
 `data_store.py`. A portfolio saved by the older qty-only version is turned
 into "opening" trades automatically, once. The watchlist is saved in the
-browser too. Because Safari on iPhone wipes site data after ~7 days without
+browser too (in the repo: `data/watchlist.json`). When the repo is connected,
+each device moves what its browser kept into the repo once
+(`migrate_browser_to_repo`, merged so the same trade is never added twice). Because Safari on iPhone wipes site data after ~7 days without
 a visit, the home screen has **גיבוי ושחזור**: download a backup file or copy
 its text, restore from a file or pasted text, and a reminder shows when there
 is data and no backup in the last 6 days.
@@ -169,6 +171,7 @@ venv\Scripts\python test_buy_score.py    # buy score, news parsing, AI reply par
 venv\Scripts\python test_ai_insights.py  # portfolio facts, AI picks (code fallback), both screens (offline)
 venv\Scripts\python test_benchmark.py    # portfolio vs index (shadow portfolio) + the app block (offline)
 venv\Scripts\python test_events.py       # this week's reports/dividends + the home card (offline)
+venv\Scripts\python test_private_repo.py # item 22: browser -> repo move, watchlist in repo, password (offline)
 venv\Scripts\python test_rank.py     # screener ranking + resume, no network
 ```
 
@@ -187,8 +190,8 @@ exactly as before):
 
 | Secret | What it does |
 |---|---|
-| `APP_PASSWORD` | Locks the app behind a password screen |
-| `DATA_REPO`, `DATA_REPO_TOKEN` | Saves the app's own data in a **private** GitHub repo instead of the local `local_data/` folder |
+| `APP_PASSWORD` | Locks the app behind a password screen. "לזכור את המכשיר הזה" keeps a token derived from the password in that browser (changing the password logs every device out); "יציאה ושכחת המכשיר הזה" at the bottom of the home screen clears it |
+| `DATA_REPO`, `DATA_REPO_TOKEN` | Saves the app's own data in a **private** GitHub repo (`evm22/stock-app-data`) instead of the browser / `local_data/`. The token: a fine-grained token for that one repo with **Contents: Read and write** |
 
 ## Daily automatic run
 

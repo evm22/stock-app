@@ -11,6 +11,7 @@ Run locally with:
 """
 
 import html
+import hashlib
 import hmac
 import json
 import os
@@ -156,25 +157,64 @@ def password_ok(entered, expected):
     return hmac.compare_digest(str(entered).encode("utf-8"), str(expected).encode("utf-8"))
 
 
-def require_password():
+REMEMBER_KEY = "auth_remember"   # browser key: "this device already entered"
+
+
+def remember_token(expected):
+    """What a remembered device keeps: derived from the password (never the
+    password itself), so changing APP_PASSWORD logs every device out."""
+    return hmac.new(str(expected).encode("utf-8"), b"stock-app remember-device v1",
+                    hashlib.sha256).hexdigest()
+
+
+def require_password(ls=None):
     """Lock the whole app behind APP_PASSWORD (only if one is configured).
-    Success is remembered for this browser session."""
+    Success is remembered for this browser session, and -- when "remember this
+    device" is ticked -- in this browser, so the iPhone home-screen icon opens
+    straight in."""
     expected = get_app_password()
     if not expected or st.session_state.get("auth_ok"):
         return
+    if st.session_state.pop("_auth_forget", False):
+        # "Log out": clear this device. The storage component caches what it
+        # read at the start of the visit, so also skip the check from now on.
+        st.session_state["_auth_forgotten"] = True
+        if ls is not None:
+            try:
+                ls.setItem(REMEMBER_KEY, "", key="auth_forget_persist")
+            except Exception:
+                pass
+        st.info("יצאת. בפעם הבאה תצטרך להקליד את הסיסמה.")
+    if ls is not None and not st.session_state.get("_auth_forgotten"):
+        try:
+            saved = str(ls.getItem(REMEMBER_KEY) or "").strip('"')
+        except Exception:
+            saved = ""
+        if saved and hmac.compare_digest(saved, remember_token(expected)):
+            st.session_state["auth_ok"] = True
+            return
+    st.markdown('<div class="sa-brand">המניות שלי</div>', unsafe_allow_html=True)
     st.markdown("### 🔒 כניסה")
-    entered = st.text_input("סיסמה", type="password", key="app_password_input")
-    if entered:
+    with st.form("login_form", border=False):
+        entered = st.text_input("סיסמה", type="password", key="app_password_input")
+        remember = st.checkbox("לזכור את המכשיר הזה", value=True, key="auth_remember_box")
+        sent = st.form_submit_button("כניסה", type="primary", width="stretch")
+    if sent and entered:
         if password_ok(entered, expected):
             st.session_state["auth_ok"] = True
-            st.session_state.pop("app_password_input", None)
+            st.session_state.pop("_auth_forgotten", None)
+            if remember and ls is not None:
+                st.session_state["_auth_dirty"] = True   # saved at the end of the next run
             st.rerun()
         else:
             st.error("הסיסמה לא נכונה. נסה שוב.")
+    st.caption("הכתובת של האפליקציה ציבורית, לכן יש סיסמה. התיק עצמו נשמר בקובץ פרטי.")
     st.stop()
 
 
-require_password()
+def _forget_device():
+    st.session_state["auth_ok"] = False
+    st.session_state["_auth_forget"] = True
 
 
 
@@ -577,11 +617,26 @@ def _local_storage():
         return None
 
 
+WATCHLIST_PATH = "data/watchlist.json"   # repo / dir backends
+
+
 def init_watchlist():
-    """Load the followed tickers into session_state once (from localStorage when
-    available) and return the storage handle. localStorage returns None until
-    its component mounts, so we load the first non-None value we see."""
+    """Load the followed tickers into session_state once (from the private
+    repo when it's connected, else from localStorage) and return the storage
+    handle. localStorage returns None until its component mounts, so we load
+    the first non-None value we see."""
     ls = _local_storage()
+    if portfolio_backend() != "browser":
+        if not st.session_state.get("_wl_loaded"):
+            try:
+                st.session_state["watchlist"] = portfolio.merge_watchlists(
+                    data_store.read_json(WATCHLIST_PATH, [], **_store_kwargs()), [])
+                st.session_state.pop("_wl_read_failed", None)
+            except data_store.DataStoreError:
+                st.session_state["_wl_read_failed"] = True   # never overwrite what we couldn't read
+            st.session_state["_wl_loaded"] = True
+        st.session_state.setdefault("watchlist", [])
+        return ls
     if ls is not None and not st.session_state.get("_wl_loaded"):
         raw = ls.getItem(WATCHLIST_KEY)
         if raw is not None:
@@ -595,7 +650,16 @@ def init_watchlist():
 
 
 def persist_watchlist(ls):
-    """Write the current watchlist back to the browser (if available)."""
+    """Write the current watchlist back (private repo, or the browser)."""
+    if portfolio_backend() != "browser":
+        if st.session_state.get("_wl_read_failed"):
+            return
+        try:
+            data_store.write_json(WATCHLIST_PATH, st.session_state["watchlist"],
+                                  "Update watchlist", **_store_kwargs())
+        except data_store.DataStoreError:
+            st.toast("לא הצלחתי לשמור את רשימת המעקב. נסה שוב.")
+        return
     if ls is None:
         return
     try:
@@ -780,6 +844,58 @@ def migrate_browser_portfolio(ls):
             ls.setItem(PORTFOLIO_KEY, "[]", key="portfolio_clear")
         except Exception:
             pass
+
+
+MOVED_KEY = "moved_to_repo"   # browser key: this device's data is in the repo
+
+
+def migrate_browser_to_repo(ls):
+    """Item 22, once per device: when the private repo gets connected, the
+    trades and watchlist this browser kept move into the repo (merged, so
+    nothing is doubled). The browser copies stay as they are, as a backup.
+    `_test_browser_trades` / `_test_browser_watchlist` stand in for the
+    browser in tests."""
+    if portfolio_backend() != "repo" or st.session_state.get("_repo_migrated"):
+        return
+    if ls is not None:
+        if ls.getItem(MOVED_KEY):
+            st.session_state["_repo_migrated"] = True
+            return
+        raw_tx, raw_wl = ls.getItem(TRADES_KEY), ls.getItem(WATCHLIST_KEY)
+    else:
+        raw_tx = st.session_state.pop("_test_browser_trades", None)
+        raw_wl = st.session_state.pop("_test_browser_watchlist", None)
+        if raw_tx is None and raw_wl is None:
+            return
+    st.session_state["_repo_migrated"] = True
+    try:
+        browser_tx = json.loads(raw_tx) if isinstance(raw_tx, str) else (raw_tx or None)
+        browser_wl = json.loads(raw_wl) if isinstance(raw_wl, str) else (raw_wl or [])
+        browser_wl = browser_wl if isinstance(browser_wl, list) else []
+    except ValueError:
+        browser_tx, browser_wl = None, []
+    added = {"tx": 0, "wl": 0}
+    try:
+        if browser_tx:
+            def _merge(cur):
+                new, n = portfolio.merge_trades(cur, browser_tx)
+                added["tx"] = n
+                return new
+            update_portfolio(_merge, "Move trades from the browser")
+        if browser_wl and not st.session_state.get("_wl_read_failed"):
+            before = list(st.session_state.get("watchlist", []))
+            merged = portfolio.merge_watchlists(before, browser_wl)
+            if merged != before:
+                data_store.write_json(WATCHLIST_PATH, merged, "Move watchlist from the browser",
+                                      **_store_kwargs())
+                st.session_state["watchlist"] = merged
+                added["wl"] = len(merged) - len(before)
+    except (portfolio.PortfolioError, data_store.DataStoreError):
+        st.session_state["_repo_migrated"] = False   # try again on the next visit
+        return
+    if added["tx"] or added["wl"]:
+        st.session_state["_repo_moved"] = (added["tx"], added["wl"])
+    st.session_state["_moved_dirty"] = ls is not None
 
 
 @st.cache_data(ttl=600)
@@ -996,6 +1112,9 @@ def render_trades_and_backup():
         if storage_is_local():
             st.caption("כרגע התיק ורשימת המעקב נשמרים רק בדפדפן במכשיר הזה. גיבוי "
                        "שומר אותם בקובץ או כטקסט, ואפשר לשחזר אותם בכל מכשיר.")
+        else:
+            st.caption("התיק ורשימת המעקב נשמרים אוטומטית בקובץ פרטי ב-GitHub, "
+                       "ורואים אותם בכל מכשיר. אפשר גם להוריד עותק משלך.")
         st.download_button(
             "⬇️ הורד קובץ גיבוי", data=backup_text,
             file_name=f"stock-app-backup-{date.today().isoformat()}.json",
@@ -1265,6 +1384,10 @@ def render_portfolio_home():
         st.error("לא הצלחתי לקרוא את התיק השמור, אז לא מציג ולא שומר שינויים כרגע. "
                  "נסה לרענן בעוד רגע.")
         return
+    to_repo = st.session_state.pop("_repo_moved", None)
+    if to_repo:
+        st.success(f"העברתי מהדפדפן לקובץ הפרטי {to_repo[0]} עסקאות ו-{to_repo[1]} "
+                   "מניות במעקב. מעכשיו הם נשמרים שם, ורואים אותם בכל מכשיר.")
     moved = st.session_state.pop("_pf_moved", None)
     if moved:
         st.success(f"העברתי {moved} מניות מהתיק שנשמר בדפדפן לשמירה החדשה, "
@@ -1741,10 +1864,12 @@ def render_watchlist_home():
 #
 # Load the watchlist first. A row click stores a pending query that we move
 # into the search box BEFORE the widget is created (Streamlit rule).
+require_password(_local_storage())
 ls = init_watchlist()
 _LS = ls
 init_last_backup(ls)
 migrate_browser_portfolio(ls)
+migrate_browser_to_repo(ls)
 if "pending_query" in st.session_state:
     st.session_state["search_box"] = st.session_state.pop("pending_query")
 
@@ -1776,6 +1901,8 @@ if home:
         render_trades_and_backup()
     st.caption("טיפ: מניות בבורסה בתל אביב מסתיימות ב-`.TA`, למשל `TEVA.TA`. "
                "החיפוש לא עובד לפי מספר נייר.")
+    if get_app_password():
+        st.button("🔒 יציאה ושכחת המכשיר הזה", key="forget_device", on_click=_forget_device)
 
 # Resolve the query to candidate tickers. If there's more than one match, let
 # the user pick the right one (e.g. the Tel-Aviv AVIV.TA, not a US ETF).
@@ -2177,6 +2304,16 @@ if st.session_state.pop("_wl_dirty", False):
     persist_watchlist(ls)
 if st.session_state.pop("_trades_dirty", False):
     persist_trades(ls)
+if ls is not None and st.session_state.pop("_auth_dirty", False):
+    try:
+        ls.setItem(REMEMBER_KEY, remember_token(get_app_password()), key="auth_persist")
+    except Exception:
+        pass
+if ls is not None and st.session_state.pop("_moved_dirty", False):
+    try:
+        ls.setItem(MOVED_KEY, date.today().isoformat(), key="moved_persist")
+    except Exception:
+        pass
 if st.session_state.pop("_bk_dirty", False) and ls is not None:
     try:
         ls.setItem(LAST_BACKUP_KEY, st.session_state.get("last_backup") or "",
