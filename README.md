@@ -79,7 +79,10 @@ with `?debug=1`. Tel-Aviv prices show in ₪ (Yahoo quotes them in agorot).
 On a stock page, "הוספה לתיק" records how many shares and the average buy
 price; `portfolio.py` does the math (foreign stocks converted to ₪ at
 today's rate). Portfolio and watchlist are saved in the browser on that
-device. Colors live in `.streamlit/config.toml`, the layout CSS at
+device. Because Safari on iPhone wipes site data after ~7 days without a
+visit, the home screen has **גיבוי ושחזור** (`backup.py`): save a backup file
+or copy its text, and restore it on any device; a reminder shows when there
+is data and no backup in the last 6 days. Colors live in `.streamlit/config.toml`, the layout CSS at
 the top of `app.py`. Some engine texts (signal names, tooltips) are still
 English.
 
@@ -122,6 +125,7 @@ venv\Scripts\python test_scan.py     # screener rows, no network
 venv\Scripts\python test_data_store.py  # data store (local + mocked GitHub)
 venv\Scripts\python test_daily_job.py   # daily run: guard, history, ranking, Telegram (mocked)
 venv\Scripts\python test_portfolio.py    # portfolio math + app flow on sample data (offline)
+venv\Scripts\python test_backup.py       # backup/restore + reminder, incl. app flow (offline)
 venv\Scripts\python test_rank.py     # screener ranking + resume, no network
 ```
 

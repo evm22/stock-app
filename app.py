@@ -23,6 +23,9 @@ import engine  # our pure-Python data engine (no Streamlit inside it)
 import gemini_helper  # OPTIONAL Gemini explanation layer (no-op without a key)
 import famous_investors  # famous-investor 13F holdings from SEC EDGAR (no key)
 import portfolio  # the user's holdings: units, P&L, totals in ₪ (pure Python)
+import backup  # backup & restore text for portfolio + watchlist (pure Python)
+from datetime import datetime
+from zoneinfo import ZoneInfo
 
 # Basic page configuration (title shown in the browser tab, etc.).
 st.set_page_config(page_title="המניות שלי", page_icon="📈",
@@ -56,6 +59,7 @@ h1, h2, h3, h4 { font-family: "Rubik", "Assistant", system-ui, sans-serif !impor
 [data-testid="stDataFrame"], [data-testid="stTable"], .vega-embed { direction: ltr; text-align: left; }
 /* Range buttons (1D ... 5Y) read left-to-right like on every chart app. */
 [data-testid="stButtonGroup"] { direction: ltr; }
+[data-testid="stCode"], [data-testid="stCode"] pre { direction: ltr; text-align: left; }
 .sa-num { direction: ltr; unicode-bidi: isolate; display: inline-block; font-variant-numeric: tabular-nums; }
 
 /* No hover link icons next to headings. */
@@ -629,6 +633,47 @@ def init_portfolio(ls):
     st.session_state.setdefault("portfolio", [])
 
 
+LAST_BACKUP_KEY = "last_backup"
+ISRAEL_TZ = ZoneInfo("Asia/Jerusalem")
+
+
+def _now():
+    return datetime.now(ISRAEL_TZ)
+
+
+def init_last_backup(ls):
+    """When the user last saved a backup on this device (ISO text) or None."""
+    if ls is not None and not st.session_state.get("_bk_loaded"):
+        raw = ls.getItem(LAST_BACKUP_KEY)
+        if raw is not None:
+            st.session_state["last_backup"] = str(raw).strip('"') or None
+            st.session_state["_bk_loaded"] = True
+    st.session_state.setdefault("last_backup", None)
+
+
+def _mark_backup():
+    """Download / 'I copied it' callback: remember the backup time."""
+    st.session_state["last_backup"] = _now().isoformat(timespec="seconds")
+    st.session_state["_bk_dirty"] = True
+
+
+def _restore_backup():
+    """Restore callback: an uploaded file wins over pasted text."""
+    upload = st.session_state.get("restore_file")
+    text = upload.getvalue() if upload is not None else st.session_state.get("restore_text", "")
+    try:
+        restored = backup.parse_backup(text)
+    except backup.BackupError as exc:
+        st.session_state["_bk_msg"] = ("error", str(exc))
+        return
+    st.session_state["portfolio"] = restored["portfolio"]
+    st.session_state["watchlist"] = restored["watchlist"]
+    st.session_state["_pf_dirty"] = True
+    st.session_state["_wl_dirty"] = True
+    st.session_state["restore_text"] = ""
+    st.session_state["_bk_msg"] = ("ok", "שוחזר: " + backup.summary(restored))
+
+
 def persist_portfolio(ls):
     if ls is None:
         return
@@ -940,6 +985,43 @@ def render_portfolio_home():
                       width="stretch")
 
 
+def render_backup_home():
+    """'Backup & restore' on the home screen (mockup item 9)."""
+    holdings = st.session_state.get("portfolio", [])
+    watchlist = st.session_state.get("watchlist", [])
+    msg = st.session_state.pop("_bk_msg", None)
+    if msg:
+        (st.success if msg[0] == "ok" else st.error)(msg[1])
+    last = st.session_state.get("last_backup")
+    if backup.needs_reminder(last, _now(), bool(holdings or watchlist)):
+        st.warning("💾 כדאי לשמור גיבוי: ספארי באייפון מוחק את הנתונים של האתר "
+                   "אחרי כשבוע בלי כניסה. פתח את **גיבוי ושחזור** למטה.")
+    with st.expander("גיבוי ושחזור", expanded=False):
+        now = _now()
+        text = backup.make_backup(holdings, watchlist, now)
+        st.caption("התיק ורשימת המעקב נשמרים רק בדפדפן במכשיר הזה. גיבוי שומר "
+                   "אותם בקובץ או כטקסט, ואפשר לשחזר אותם בכל מכשיר.")
+        st.download_button("💾 שמור קובץ גיבוי", data=text.encode("utf-8"),
+                           file_name=backup.file_name(now), mime="application/json",
+                           on_click=_mark_backup, key="backup_download",
+                           width="stretch")
+        st.caption("או העתק את הטקסט (כפתור ההעתקה בפינה) ושמור אותו, למשל בפתקים:")
+        st.code(text, language="json")
+        st.button("✓ העתקתי ושמרתי", key="backup_copied", on_click=_mark_backup)
+        if last:
+            try:
+                when = datetime.fromisoformat(last).strftime("%d.%m.%Y %H:%M")
+            except ValueError:
+                when = last
+            st.caption(f"גיבוי אחרון: \u2066{when}\u2069")
+        st.markdown("**שחזור**")
+        st.file_uploader("מקובץ גיבוי", type=["json"], key="restore_file")
+        st.text_area("או הדבק כאן את טקסט הגיבוי", key="restore_text", height=100)
+        st.button("שחזר", key="restore_btn", on_click=_restore_backup, type="primary",
+                  width="stretch")
+        st.caption("שחזור מחליף את התיק ורשימת המעקב שבמכשיר הזה בנתונים שבגיבוי.")
+
+
 def render_watchlist_home():
     """The followed stocks as tappable rows on the home screen."""
     st.markdown("#### במעקב")
@@ -977,6 +1059,7 @@ def render_watchlist_home():
 # into the search box BEFORE the widget is created (Streamlit rule).
 ls = init_watchlist()
 init_portfolio(ls)
+init_last_backup(ls)
 if "pending_query" in st.session_state:
     st.session_state["search_box"] = st.session_state.pop("pending_query")
 
@@ -999,6 +1082,7 @@ query = st.text_input(
 if home:
     render_portfolio_home()
     render_watchlist_home()
+    render_backup_home()
     st.caption("טיפ: מניות בבורסה בתל אביב מסתיימות ב-`.TA`, למשל `TEVA.TA`. "
                "החיפוש לא עובד לפי מספר נייר.")
 
@@ -1423,3 +1507,9 @@ if st.session_state.pop("_wl_dirty", False):
     persist_watchlist(ls)
 if st.session_state.pop("_pf_dirty", False):
     persist_portfolio(ls)
+if st.session_state.pop("_bk_dirty", False) and ls is not None:
+    try:
+        ls.setItem(LAST_BACKUP_KEY, st.session_state.get("last_backup") or "",
+                   key="last_backup_persist")
+    except Exception:
+        pass
