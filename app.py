@@ -41,7 +41,8 @@ for _mod in (data_store, portfolio, buy_score, news, ai_insights, benchmark, eve
              gemini_helper, famous_investors, engine):
     try:
         _mtime = os.path.getmtime(_mod.__file__)
-        if getattr(_mod, "_file_mtime", _mtime) != _mtime:
+        # No stamp yet = loaded by an older app.py (or just now): reload once.
+        if getattr(_mod, "_file_mtime", None) != _mtime:
             importlib.reload(_mod)
         _mod._file_mtime = _mtime
     except Exception:
