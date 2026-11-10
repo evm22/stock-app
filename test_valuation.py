@@ -165,6 +165,31 @@ class FakeFetch:
                 "dividend_per_share": None}
 
 
+class TestMessageNames(unittest.TestCase):
+    def test_label_and_names_file(self):
+        self.assertEqual(daily_job.label("MSFT", {"MSFT": "Microsoft"}), "Microsoft (MSFT)")
+        self.assertEqual(daily_job.label("XYZ", {}), "XYZ")
+        ranked = [{"symbol": "MSFT", "regions": ["US"]}, {"symbol": "TEVA.TA", "regions": ["IL"]}]
+        syms = daily_job.message_symbols(ranked, {"entered": ["MSFT"], "left": ["OLD"]},
+                                         {"short": [{"symbol": "NVDA"}], "long": []})
+        self.assertEqual(syms, ["MSFT", "TEVA.TA", "OLD", "NVDA"])
+        calls = []
+
+        def name_fn(sym):
+            calls.append(sym)
+            return {"MSFT": "Microsoft Corporation", "NVDA": "NVIDIA Corporation"}.get(sym)
+        with tempfile.TemporaryDirectory() as tmp:
+            names = daily_job.collect_names(["MSFT", "NVDA", "NOPE"], tmp, name_fn)
+            self.assertEqual(names, {"MSFT": "Microsoft", "NVDA": "NVIDIA"})
+            daily_job.collect_names(["MSFT", "NVDA"], tmp, name_fn)     # kept: not fetched again
+            self.assertEqual(calls, ["MSFT", "NVDA", "NOPE"])
+        line = daily_job._top_line({"rank": 1, "symbol": "MSFT", "opportunity": 72,
+                                    "our_label": "Buy", "upside_pct": 12}, False, names)
+        self.assertTrue(line.startswith("1. Microsoft (MSFT)"), line)
+        pl = daily_job.picks_lines({"source": "ai", "short": [{"symbol": "NVDA", "why": "x"}]}, names)
+        self.assertIn("• NVIDIA (NVDA) – x", pl)
+
+
 class TestDailyJobPart(unittest.TestCase):
     def test_writes_scores_and_lines(self):
         with tempfile.TemporaryDirectory() as tmp:

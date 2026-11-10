@@ -61,6 +61,7 @@ SUMMARY_PATH = "data/last_summary.txt"
 RANKED_LATEST_PATH = "data/ranked/latest.json"
 RANKED_DAY_PATH = "data/ranked/{day}.json"
 AI_PICKS_PATH = "data/ai_picks.json"   # "ה-AI ממליץ" (read by the app)
+NAMES_PATH = "data/names.json"   # symbol -> company name (kept, fetched once)
 HOLDING_SCORES_PATH = "data/holding_scores.json"   # my stocks' scores + calendar (app)
 PORTFOLIO_PATH = "data/portfolio.json"
 WATCHLIST_PATH = "data/watchlist.json"
@@ -163,14 +164,55 @@ def diff_top(today, previous, n=TOP_N):
     }
 
 
-def _top_line(e, new):
+VERDICT_HE = {"Strong Buy": "קנייה חזקה", "Buy": "קנייה", "Hold": "החזקה",
+              "Sell": "מכירה", "Strong Sell": "מכירה חזקה"}
+
+
+def label(sym, names=None):
+    """'Microsoft (MSFT)' when the name is known, else just the symbol."""
+    name = (names or {}).get(sym)
+    return f"{name} ({sym})" if name and name.upper() != sym.upper() else sym
+
+
+def message_symbols(ranked, diff, picks=None):
+    """Every symbol the message will mention (for fetching their names)."""
+    out = [e["symbol"] for e in ranked[:TOP_N]]
+    out += list(diff.get("entered", [])) + list(diff.get("left", []))
+    out += [e["symbol"] for e in ranked if "IL" in e.get("regions", [])][:ISRAEL_TOP_N]
+    for key in ("short", "long"):
+        out += [p["symbol"] for p in (picks or {}).get(key, [])]
+    return list(dict.fromkeys(out))
+
+
+def collect_names(symbols, data_dir, name_fn):
+    """{symbol: short company name}: from data/names.json, fetching only the
+    missing ones with name_fn(symbol) (None = unknown) and saving them."""
+    import valuation
+    known = data_store.read_json(NAMES_PATH, default={}, local_dir=data_dir) or {}
+    added = False
+    for sym in symbols:
+        if sym in known:
+            continue
+        try:
+            name = name_fn(sym)
+        except Exception:
+            name = None
+        if name:
+            known[sym] = valuation.short_name(name, sym)
+            added = True
+    if added:
+        data_store.write_json(NAMES_PATH, dict(sorted(known.items())), local_dir=data_dir)
+    return known
+
+
+def _top_line(e, new, names=None):
     up = f"{e['upside_pct']:+.0f}%" if e.get("upside_pct") is not None else "—"
-    return (f"{e['rank']}. {e['symbol']}  {e['opportunity']:.0f}  "
-            f"({e['our_label']}, אנליסטים {up})"
+    return (f"{e['rank']}. {label(e['symbol'], names)}  {e['opportunity']:.0f}  "
+            f"({VERDICT_HE.get(e['our_label'], e['our_label'])}, אנליסטים {up})"
             f"{' ✅' if e.get('agree') else ''}{' 🆕' if new else ''}")
 
 
-def build_message(rows, ranked, diff, today, complete=True):
+def build_message(rows, ranked, diff, today, complete=True, names=None):
     """The full Hebrew Telegram message."""
     counts = {"ok": 0, "partial": 0, "failed": 0}
     for r in rows:
@@ -189,21 +231,22 @@ def build_message(rows, ranked, diff, today, complete=True):
 
     out += ["", f"🏆 {TOP_N} ההזדמנויות המובילות (טווח שנה):"]
     entered = set(diff["entered"]) if diff["has_previous"] else set()
-    out += [_top_line(e, e["symbol"] in entered) for e in ranked[:TOP_N]]
+    out += [_top_line(e, e["symbol"] in entered, names) for e in ranked[:TOP_N]]
 
     if diff["has_previous"]:
         out.append("")
         if diff["entered"]:
-            out.append("🆕 נכנסו לטופ: " + ", ".join(diff["entered"]))
+            out.append("🆕 נכנסו לטופ: " + ", ".join(label(s, names) for s in diff["entered"]))
         if diff["left"]:
-            out.append("⬇️ יצאו מהטופ: " + ", ".join(diff["left"]))
+            out.append("⬇️ יצאו מהטופ: " + ", ".join(label(s, names) for s in diff["left"]))
         if not (diff["entered"] or diff["left"]):
             out.append("ללא שינוי בטופ מהריצה הקודמת.")
 
     il = [e for e in ranked if "IL" in e.get("regions", [])][:ISRAEL_TOP_N]
     if il:
         out += ["", "🇮🇱 המובילות בישראל:"]
-        out += [f"• {e['symbol']}  {e['opportunity']:.0f}  ({e['our_label']})"
+        out += [f"• {label(e['symbol'], names)}  {e['opportunity']:.0f}  "
+                f"({VERDICT_HE.get(e['our_label'], e['our_label'])})"
                 for e in il]
 
     out += ["",
@@ -248,7 +291,7 @@ def make_ai_picks(rows, today, api_key=None):
             "long": picks["long"], "candidates": candidates}
 
 
-def picks_lines(picks):
+def picks_lines(picks, names=None):
     """The Telegram section for the picks."""
     if not picks or not (picks.get("short") or picks.get("long")):
         return []
@@ -257,7 +300,7 @@ def picks_lines(picks):
     for key, name in (("short", "טווח קצר"), ("long", "טווח ארוך")):
         if picks.get(key):
             out.append(f"{name}:")
-            out += [f"• {p['symbol']} – {p['why']}" for p in picks[key]]
+            out += [f"• {label(p['symbol'], names)} – {p['why']}" for p in picks[key]]
     return out
 
 
@@ -441,6 +484,7 @@ def run(data_dir, limit=None, force=False, now_utc=None, scan_fn=None, universe=
     results_file = data_store._local_path(RESULTS_PATH, data_dir)
     os.makedirs(os.path.dirname(results_file), exist_ok=True)
 
+    scan_fn_given = scan_fn is not None
     if scan_fn is None:
         import scan  # imported here so tests can run without yfinance calls
         resume = _resume_today(results_file, today)
@@ -495,13 +539,22 @@ def run(data_dir, limit=None, force=False, now_utc=None, scan_fn=None, universe=
     data_store.write_json(AI_PICKS_PATH, picks, local_dir=data_dir)
     last_run["ai_picks"] = picks["source"]
 
-    mine = portfolio_part(data_dir, today, fetch=fetch)
+    # Real runs fetch from the network; tests inject scan_fn and get no names.
+    fetch = fetch or (Fetchers() if scan_fn_given is False else None)
+    mine = portfolio_part(data_dir, today, fetch=fetch) if fetch else []
     last_run["portfolio_lines"] = len(mine)
-    message = build_message(rows, ranked, diff_top(ranked, previous), today,
-                            complete=result.get("complete", True))
+    diff = diff_top(ranked, previous)
+    names = {}
+    if fetch:
+        def _name(sym):
+            q = fetch.quote(sym)
+            return q.name if (q and q.found) else None
+        names = collect_names(message_symbols(ranked, diff, picks), data_dir, _name)
+    message = build_message(rows, ranked, diff, today,
+                            complete=result.get("complete", True), names=names)
     if mine:   # my portfolio first, then the market scan
         message = "\n".join(mine) + "\n\n" + message
-    extra = picks_lines(picks)
+    extra = picks_lines(picks, names)
     if extra:  # before the two footer lines (formula + disclaimer)
         lines = message.split("\n")
         message = "\n".join(lines[:-3] + extra + lines[-3:])

@@ -42,7 +42,7 @@ def closes_major(history, currency):
 
 _NAME_SUFFIXES = (" and Company", " & Co.", ", Inc.", " Inc.", " Inc", " Corporation",
                   " Corp.", " Corp", " Limited", " Ltd.", " Ltd", " plc", " PLC", " N.V.",
-                  " S.A.", " AG", " SE", " Holdings", " Industries", " Group", " Co.",
+                  " S.A.", " AG", " SE", " Holdings", " Industries", " Co.",
                   " Company", " B.M.")
 
 

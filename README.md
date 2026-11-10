@@ -150,7 +150,7 @@ streamlit run dev/demo_app.py
   saves `data/holding_scores.json` (+ their calendars); the home screen reads
   it (scores up to 2 days old) instead of computing 20+ scores live. The
   morning message starts with a personal part: my total, the last day, the
-  biggest movers, this week's reports / dividends and big score changes.
+  biggest movers, this week's reports / dividends and big score changes. Every stock in the message is "Name (SYMBOL)": names are fetched once and kept in `data/names.json`; verdicts are in Hebrew.
 - Chart date labels are Hebrew (`HE_DATE_EXPR`), tooltips dd.mm.yyyy.
 - Gemini runs on `google-genai` (the old `google-generativeai` SDK's support
   ended), through one `gemini_helper._generate()`.
