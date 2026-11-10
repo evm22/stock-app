@@ -41,5 +41,7 @@ screen_results.json
 scan_full.log
 *.json.tmp
 top*.json
-history/
 logs/
+
+# --- App data kept locally until the private data repo is connected ---
+local_data/

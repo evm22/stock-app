@@ -23,7 +23,7 @@ def _row(symbol, s1y=60.0, label="Buy", upside=20.0, beta=1.0, d2e=50.0,
     return {
         "symbol": symbol, "themes": list(themes), "regions": list(regions),
         "score_6m": label, "score_1y": label, "score_5y": label,
-        "score_num": {"6m": s1y, "1y": s1y, "5y": s1y},
+        "score_6m_num": s1y, "score_1y_num": s1y, "score_5y_num": s1y,
         "current_price": 100.0,
         "analyst_mean_target": 100 + (upside or 0),
         "analyst_implied_upside_pct": upside,
@@ -63,15 +63,23 @@ class TestScoring(unittest.TestCase):
         pts, _ = rank.risk_penalty(_row("X", beta=9.0, d2e=50))
         self.assertAlmostEqual(pts, rank.BETA_PENALTY_MAX)
 
+    def test_nested_score_num_from_older_files(self):
+        r = _row("X")
+        for h in ("6m", "1y", "5y"):
+            del r[f"score_{h}_num"]
+        r["score_num"] = {"6m": 1.0, "1y": 72.0, "5y": 3.0}
+        self.assertAlmostEqual(rank.our_score(r, "1y"), 72.0)
+
     def test_label_fallback_for_old_files(self):
         r = _row("X", label="Strong Buy")
-        del r["score_num"]
+        for h in ("6m", "1y", "5y"):
+            del r[f"score_{h}_num"]
         self.assertAlmostEqual(rank.our_score(r, "1y"), 87.5)
 
     def test_failed_or_unscored_rows_skipped(self):
         self.assertIsNone(rank.score_row(_row("X", status="failed")))
         r = _row("Y")
-        r["score_num"]["1y"] = None
+        r["score_1y_num"] = None
         r["score_1y"] = None
         self.assertIsNone(rank.score_row(r))
 
@@ -164,8 +172,9 @@ class TestScanAdditions(unittest.TestCase):
         with open(self.path) as fh:
             data = json.load(fh)
         self.assertTrue(data["complete"])
-        self.assertEqual(data["rows"][0]["score_num"],
-                         {"6m": 60.0, "1y": 50.0, "5y": 80.0})
+        r0 = data["rows"][0]
+        self.assertEqual((r0["score_6m_num"], r0["score_1y_num"],
+                          r0["score_5y_num"]), (60.0, 50.0, 80.0))
 
     def test_resume_skips_already_scored(self):
         # Simulate an interrupted run: checkpoint with the first 2 rows.

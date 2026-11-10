@@ -52,7 +52,7 @@ RISK_PENALTY_MAX = 20.0
 HORIZONS = ("6m", "1y", "5y")
 BULLISH_LABELS = ("Buy", "Strong Buy")
 
-# Fallback when a row only has a label (older scan files without score_num):
+# Fallback when a row only has a label (older scan files without numbers):
 # the midpoint of each label's band in engine._label_for_score.
 _LABEL_MIDPOINT = {"Sell": 17.5, "Hold": 45.0, "Buy": 65.0, "Strong Buy": 87.5}
 
@@ -63,7 +63,9 @@ def _num(x):
 
 def our_score(row: dict, horizon: str):
     """Our 0..100 verdict score for this horizon, or None."""
-    val = (row.get("score_num") or {}).get(horizon)
+    val = row.get(f"score_{horizon}_num")
+    if not _num(val):  # older scan files nested these under "score_num"
+        val = (row.get("score_num") or {}).get(horizon)
     if _num(val):
         return float(val)
     return _LABEL_MIDPOINT.get(row.get(f"score_{horizon}"))

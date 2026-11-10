@@ -64,25 +64,8 @@ python rank.py --region IL --agree-only
 (clamped to -20%..+50%; no coverage = neutral +10%), minus a small risk penalty for high beta and heavy
 debt. The formula and its knobs are at the top of `rank.py`.
 
-### Daily job + Telegram summary
-
-`daily.py` runs the scan, ranks it, saves a dated snapshot to `history/`
-(kept for later evaluation of how the picks performed), compares with the
-previous day, and sends a Hebrew summary to Telegram via `notify.py`.
-
-1. Add the bot credentials to `.streamlit/secrets.toml` (git-ignored):
-   `TELEGRAM_TOKEN = "..."` and `TELEGRAM_CHAT_ID = "..."`
-2. Test: `python notify.py "hello"` and `python daily.py --no-scan --dry-run`
-3. Schedule it (macOS launchd): the job starts at 08:00 and the message
-   is sent at 09:00:
-
-```bash
-cp com.evyat.stockapp.daily.plist ~/Library/LaunchAgents/
-launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.evyat.stockapp.daily.plist
-```
-
-Logs go to `logs/daily.log`. The Mac must be on (if asleep at 08:00, the
-job runs when it wakes, and sends as soon as it is done).
+The daily run that does all of this automatically is described under
+**Daily automatic run** below.
 
 ## Run it locally
 
@@ -112,9 +95,10 @@ The data logic lives in `engine.py` (pure Python, no Streamlit); the UI in
 ```bash
 venv\Scripts\python test_engine.py   # engine vs live Yahoo (needs internet)
 venv\Scripts\python test_app.py      # chart builder, no network (fast)
-venv\Scripts\python test_scan.py     # screener scan logic, no network
+venv\Scripts\python test_scan.py     # screener rows, no network
+venv\Scripts\python test_data_store.py  # data store (local + mocked GitHub)
+venv\Scripts\python test_daily_job.py   # daily run: guard, history, ranking, Telegram (mocked)
 venv\Scripts\python test_rank.py     # screener ranking + resume, no network
-venv\Scripts\python test_daily.py    # daily job + Telegram (mocked), no network
 ```
 
 Each prints a plain-text `PASS`/`FAIL` per check and exits `0` if everything
@@ -126,3 +110,43 @@ Never commit API keys or secrets to this repository. When we need them later,
 we'll use [Streamlit secrets](https://docs.streamlit.io/develop/concepts/connections/secrets-management)
 (a local `.streamlit/secrets.toml` file, which is git-ignored, and the secrets
 manager in Streamlit Community Cloud for deployment).
+
+Optional secrets the app understands (all can be left out; the app then works
+exactly as before):
+
+| Secret | What it does |
+|---|---|
+| `APP_PASSWORD` | Locks the app behind a password screen |
+| `DATA_REPO`, `DATA_REPO_TOKEN` | Saves the app's own data in a **private** GitHub repo instead of the local `local_data/` folder |
+
+## Daily automatic run
+
+`daily_job.py` runs the screener once a day, saves `screen_results.json`,
+appends each stock's numeric scores + price to `score_history.csv`, and saves
+the full ranked list to `ranked/YYYY-MM-DD.json` (both kept for checking
+"were the picks right?" later). It only runs from 07:00 Israel time and once
+per day. It then sends a Hebrew Telegram summary (top 10, who entered / left
+the top since the previous run, top Israeli stocks) through `notify.py`.
+
+Telegram credentials: `TELEGRAM_BOT_TOKEN` (or `TELEGRAM_TOKEN`) and
+`TELEGRAM_CHAT_ID`, from the environment or the git-ignored
+`.streamlit/secrets.toml`. Test with `python notify.py "hello"`.
+
+```bash
+venv\Scripts\python daily_job.py --limit 5 --force --dry-run  # quick test, print only
+venv\Scripts\python daily_job.py --send-at 09:00               # hold message until 09:00
+```
+
+**On the Mac (active now):** launchd starts the job at 08:00 and the message is
+sent at 09:00. The Mac must be on; if it is asleep at 08:00 the job runs when
+it wakes. Logs: `logs/daily.log`.
+
+```bash
+cp com.evyat.stockapp.daily.plist ~/Library/LaunchAgents/
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.evyat.stockapp.daily.plist
+```
+
+The GitHub Actions workflow that runs it every morning is kept as a template in
+`deploy/stock-app-data/`. It is meant for the private data repo and is **not**
+active in this public repo (GitHub only runs workflows under `.github/`).
+`keep_awake.py` (used by that workflow) visits the live app so it isn't asleep.

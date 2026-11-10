@@ -1,10 +1,11 @@
 """
-notify.py -- send a message to Telegram (used by daily.py).
+notify.py -- send a message to Telegram (used by daily_job.py).
 
 No extra dependencies: talks to the Telegram Bot HTTP API with urllib.
 
 Credentials, first match wins (NEVER commit them):
-  1. environment variables TELEGRAM_TOKEN and TELEGRAM_CHAT_ID
+  1. environment variables TELEGRAM_BOT_TOKEN (or TELEGRAM_TOKEN) and
+     TELEGRAM_CHAT_ID
   2. .streamlit/secrets.toml (git-ignored), keys of the same names:
          TELEGRAM_TOKEN   = "123456:ABC..."
          TELEGRAM_CHAT_ID = "123456789"
@@ -29,7 +30,8 @@ TELEGRAM_MAX_LEN = 4096   # Telegram's per-message character limit
 def load_credentials(secrets_path: str = None):
     """Return (token, chat_id), or (None, None) if not configured."""
     secrets_path = secrets_path or SECRETS_PATH
-    token = os.environ.get("TELEGRAM_TOKEN")
+    token = (os.environ.get("TELEGRAM_BOT_TOKEN")      # GitHub Actions name
+             or os.environ.get("TELEGRAM_TOKEN"))
     chat = os.environ.get("TELEGRAM_CHAT_ID")
     if token and chat:
         return token, chat
