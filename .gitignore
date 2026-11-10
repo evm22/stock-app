@@ -23,7 +23,9 @@ secrets.toml
 *.pem
 
 # --- Streamlit ---
-.streamlit/
+# Ignore everything in .streamlit/ (secrets!) EXCEPT the theme file.
+.streamlit/*
+!.streamlit/config.toml
 
 # --- IDE / editor ---
 .vscode/

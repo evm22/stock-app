@@ -170,7 +170,7 @@ def expect_format_metric_by_fmt():
         return engine.Metric("label", value, available, fmt, "src")
 
     # Missing values always show a friendly n/a, whatever the fmt.
-    assert app.format_metric(m(None, "money", available=False), "USD") == "n/a"
+    assert app.format_metric(m(None, "money", available=False), "USD") == "—"  # missing values show a dash
 
     # Money formats carry the currency; ratios/percents do not.
     assert app.format_metric(m(4_362_291_642_368, "large_money"), "USD") == "4.36T USD"

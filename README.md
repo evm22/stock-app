@@ -150,3 +150,15 @@ The GitHub Actions workflow that runs it every morning is kept as a template in
 `deploy/stock-app-data/`. It is meant for the private data repo and is **not**
 active in this public repo (GitHub only runs workflows under `.github/`).
 `keep_awake.py` (used by that workflow) visits the live app so it isn't asleep.
+
+## Working on the look offline
+
+`dev/demo_app.py` runs the real `app.py` with made-up sample data (AAPL, NVDA,
+TEVA.TA), so you can see and screenshot the UI without internet access:
+
+```bash
+streamlit run dev/demo_app.py
+```
+
+The colors live in `.streamlit/config.toml` (committed); the Hebrew
+right-to-left layout and the small cards are CSS at the top of `app.py`.

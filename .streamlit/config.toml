@@ -1,0 +1,13 @@
+# App look (committed). Secrets go in .streamlit/secrets.toml, which stays
+# git-ignored.
+[theme]
+base = "dark"
+primaryColor = "#8EA2FF"
+backgroundColor = "#0D1320"
+secondaryBackgroundColor = "#151D2B"
+textColor = "#E7ECF4"
+borderColor = "#283347"
+baseRadius = "0.75rem"
+
+[client]
+toolbarMode = "minimal"
