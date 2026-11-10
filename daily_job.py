@@ -292,6 +292,9 @@ class Fetchers:
     def calendar(self, sym):
         return self.events.fetch_calendar(sym)
 
+    def fx_history(self, sym):
+        return self.engine.get_price_history(sym, "5Y")
+
 
 def portfolio_part(data_dir, today, fetch=None):
     """
@@ -368,7 +371,18 @@ def portfolio_part(data_dir, today, fetch=None):
             "date": today, "generated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
             "scores": scores, "calendar": calendars}, local_dir=data_dir)
 
-        rows, names = valuation.value_rows(data, quote_fn, fx_fn, closes_fn)
+        fx_hist = {}
+
+        def fx_on(cur, day):
+            sym = portfolio.fx_symbol(cur)
+            if sym and sym not in fx_hist:
+                try:
+                    fx_hist[sym] = valuation.closes_major(fetch.fx_history(sym), "")
+                except Exception:
+                    fx_hist[sym] = []
+            return valuation.rate_on(fx_hist.get(sym), day) if sym else 1.0
+
+        rows, names = valuation.value_rows(data, quote_fn, fx_fn, closes_fn, fx_on=fx_on)
         held = {h["symbol"]: h["qty"] for h in portfolio.as_holdings(portfolio.compute(data))}
         week = events.upcoming({s: calendars.get(s) for s in held}, held)
         old = {s: (v or {}).get("score") for s, v in (previous.get("scores") or {}).items()} \

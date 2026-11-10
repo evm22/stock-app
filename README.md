@@ -134,6 +134,27 @@ To work on the look without internet, `dev/demo_app.py` runs the real
 streamlit run dev/demo_app.py
 ```
 
+### Portfolio value, scores and the morning message
+- `valuation.py` values the portfolio for BOTH the app and the morning message
+  (one implementation): quotes in parallel, foreign stocks' cost in ₪ at the
+  rate of each buy day (`portfolio.home_costs`; the tax card also shows the
+  realized gain in ₪ at the trade-day rates), and hand-valued funds move with
+  their index since the last manual update ("מוערך לפי המדד"; on the update day
+  the typed value is used as is; currency moves are not included).
+- The home list is grouped (מניות / קרנות סל / קרנות) with subtotals, sorted by
+  value; "מבט על התיק" shows the 6 biggest weights plus the rest, and two
+  allocation bars (by type, by currency).
+- Fund scores are labeled "מגמה": an index has no financials, so it's a price
+  trend / momentum score, not a buy score.
+- `daily_job.py` scores every stock I hold / my funds follow / I watch and
+  saves `data/holding_scores.json` (+ their calendars); the home screen reads
+  it (scores up to 2 days old) instead of computing 20+ scores live. The
+  morning message starts with a personal part: my total, the last day, the
+  biggest movers, this week's reports / dividends and big score changes.
+- Chart date labels are Hebrew (`HE_DATE_EXPR`), tooltips dd.mm.yyyy.
+- Gemini runs on `google-genai` (the old `google-generativeai` SDK's support
+  ended), through one `gemini_helper._generate()`.
+
 ## Run it locally
 
 ```bash
@@ -171,6 +192,7 @@ venv\Scripts\python test_buy_score.py    # buy score, news parsing, AI reply par
 venv\Scripts\python test_ai_insights.py  # portfolio facts, AI picks (code fallback), both screens (offline)
 venv\Scripts\python test_benchmark.py    # portfolio vs index (shadow portfolio) + the app block (offline)
 venv\Scripts\python test_events.py       # this week's reports/dividends + the home card (offline)
+venv\Scripts\python test_valuation.py   # portfolio value, fund estimate, ₪ cost at buy-day rate, groups, morning message (offline)
 venv\Scripts\python test_manual.py      # hand-valued holdings (Israeli funds with no Yahoo price) (offline)
 venv\Scripts\python test_private_repo.py # item 22: browser -> repo move, watchlist in repo, password (offline)
 venv\Scripts\python test_rank.py     # screener ranking + resume, no network

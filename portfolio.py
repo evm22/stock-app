@@ -519,6 +519,45 @@ def realized_in_year(result, year):
     return out
 
 
+def home_costs(data, fx_on):
+    """
+    The cost in ₪ at the exchange rate of each trade's own day (Israeli tax
+    counts the gain in shekels, so a dollar stock bought at 3.70 and sold at
+    3.20 has a smaller ₪ gain than its $ gain).
+    fx_on(currency, iso_date) -> rate to ₪ on that day, or None if unknown.
+    -> (cost, realized):
+       cost     = {symbol: ₪ cost of the shares held now} (missing = a rate was unknown)
+       realized = [(iso_date, ₪ profit)] for each sale (missing when unknown)
+    Same average-cost method as compute(); ₪ stocks just use rate 1.
+    """
+    basis, qty, broken = {}, {}, set()
+    realized = []
+    for t in _sorted(data.get("transactions", [])):
+        sym, cur = t["symbol"], (t.get("currency") or "").upper()
+        q, price = float(t["qty"]), float(t["price"])
+        rate = 1.0 if cur in ("", HOME_CURRENCY) else fx_on(cur, t["date"])
+        if not _num(rate):
+            broken.add(sym)
+            rate = None
+        if t["side"] == "buy":
+            qty[sym] = qty.get(sym, 0.0) + q
+            if rate is not None:
+                basis[sym] = basis.get(sym, 0.0) + q * price * rate
+        else:
+            held = qty.get(sym, 0.0)
+            frac = min(1.0, q / held) if held > 0 else 1.0
+            removed = basis.get(sym, 0.0) * frac
+            basis[sym] = basis.get(sym, 0.0) - removed
+            qty[sym] = max(0.0, held - q)
+            if rate is not None and sym not in broken:
+                realized.append((t["date"], q * price * rate - removed))
+            if qty[sym] < 1e-9:
+                qty[sym], basis[sym] = 0.0, 0.0
+                broken.discard(sym)
+    cost = {s: b for s, b in basis.items() if qty.get(s, 0) > 0 and s not in broken}
+    return cost, realized
+
+
 def tax_estimate(profit):
     """Rough 25% on a positive profit; 0 on a loss."""
     return max(0.0, profit) * TAX_RATE

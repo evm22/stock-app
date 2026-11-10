@@ -17,6 +17,12 @@ from datetime import date
 import portfolio
 
 
+def rate_on(closes, day_iso):
+    """The rate on (or the last trading day before) day_iso; None before the
+    first known day."""
+    return _close_on(closes, day_iso)
+
+
 def closes_major(history, currency):
     """engine.PriceHistory -> [(iso_date, close)] in the MAJOR unit (agorot ->
     ₪, pence -> £). [] when there's no data. Shared by the app and the job."""
@@ -90,8 +96,10 @@ def index_move(m, quote_fn, closes_fn, today=None):
 
 # --- valuing the whole portfolio ------------------------------------------------
 
-def value_rows(data, quote_fn, fx_fn, closes_fn=None, today=None):
+def value_rows(data, quote_fn, fx_fn, closes_fn=None, today=None, fx_on=None):
     """
+    fx_on(currency, iso_date) -> the rate on that day (optional): foreign
+    stocks then cost their ₪ price on the buy days, not at today's rate.
     quote_fn(symbol)  -> (price_in_major_unit, change_pct, currency, name) or None
     fx_fn(currency)   -> rate to ₪ or None
     closes_fn(symbol) -> [(iso, close)] (for funds; may be None)
@@ -108,6 +116,13 @@ def value_rows(data, quote_fn, fx_fn, closes_fn=None, today=None):
                 names[h["symbol"]] = short_name(name, h["symbol"])
         fx = fx_fn(currency) if currency else None
         rows.append(portfolio.position(h, price, currency or "", change, fx))
+    if fx_on is not None:
+        cost_home, _ = portfolio.home_costs(data, fx_on)
+        for r in rows:
+            if r["currency"] != portfolio.HOME_CURRENCY and r["symbol"] in cost_home \
+                    and r["cost_home"] is not None:
+                r["cost_home"] = cost_home[r["symbol"]]
+                r["cost_at_buy_rate"] = True
     for m in data.get("manual", []):
         factor, day = (index_move(m, lambda s: (quote_fn(s) or (None, None))[:2],
                                   closes_fn, today)
@@ -116,6 +131,53 @@ def value_rows(data, quote_fn, fx_fn, closes_fn=None, today=None):
         rows.append(r)
         names[r["symbol"]] = m["name"]
     return rows, names
+
+
+# --- groups and allocation (home screen) ------------------------------------------
+
+GROUPS = (("stock", "מניות"), ("etf", "קרנות סל"), ("fund", "קרנות (שווי ידני)"))
+_ETF_WORDS = ("ETF", "TRUST", "SPDR", "ISHARES", "VANGUARD", "INVESCO", " FUND", "INDEX")
+
+
+def kind_of(row, name=""):
+    """'fund' (hand-valued), 'etf' (by its name) or 'stock'."""
+    if row.get("manual"):
+        return "fund"
+    up = f" {name or ''} ".upper()
+    return "etf" if any(w in up for w in _ETF_WORDS) else "stock"
+
+
+def grouped(rows, names):
+    """[(key, title, rows sorted by ₪ value, subtotal ₪ or None)] in GROUPS order,
+    empty groups left out."""
+    out = []
+    for key, title in GROUPS:
+        g = [r for r in rows if kind_of(r, names.get(r["symbol"], "")) == key]
+        if not g:
+            continue
+        g.sort(key=lambda r: -(r.get("value_home") or 0))
+        priced = [r["value_home"] for r in g if r.get("value_home") is not None]
+        out.append((key, title, g, sum(priced) if priced else None))
+    return out
+
+
+def allocation(rows, names):
+    """Shares of the ₪ total: {"kind": [(title, pct)], "currency": [(label, pct)]}.
+    Hand-valued funds count as ₪ (that's the money they're held in)."""
+    priced = [r for r in rows if r.get("value_home")]
+    total = sum(r["value_home"] for r in priced)
+    if total <= 0:
+        return {"kind": [], "currency": []}
+    titles = dict(GROUPS)
+    by_kind, by_cur = {}, {}
+    for r in priced:
+        k = kind_of(r, names.get(r["symbol"], ""))
+        by_kind[k] = by_kind.get(k, 0) + r["value_home"]
+        c = {"USD": "דולר", "ILS": "שקל", "EUR": "אירו", "GBP": "ליש״ט"}.get(r["currency"], r["currency"] or "?")
+        by_cur[c] = by_cur.get(c, 0) + r["value_home"]
+    kind = [(titles[k], by_kind[k] / total * 100) for k, _ in GROUPS if k in by_kind]
+    cur = sorted(((c, v / total * 100) for c, v in by_cur.items()), key=lambda x: -x[1])
+    return {"kind": kind, "currency": cur}
 
 
 def symbols_to_score(data, watchlist=()):

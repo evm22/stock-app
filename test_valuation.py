@@ -93,6 +93,50 @@ class TestRowsAndMessage(unittest.TestCase):
         self.assertEqual(V.short_name("NVIDIA Corporation"), "NVIDIA")
 
 
+class TestGroups(unittest.TestCase):
+    def test_grouped_and_allocation(self):
+        rows = [P.position({"symbol": "MSFT", "qty": 1, "cost": 100}, 100, "USD", 0, 3.0),
+                P.position({"symbol": "QQQ", "qty": 1, "cost": 100}, 200, "USD", 0, 3.0),
+                P.manual_row(fund())]
+        names = {"MSFT": "Microsoft", "QQQ": "Invesco QQQ Trust", "manual:f1": "קרן"}
+        g = V.grouped(rows, names)
+        self.assertEqual([(k, len(r), round(t)) for k, _, r, t in g],
+                         [("stock", 1, 300), ("etf", 1, 600), ("fund", 1, 1000)])
+        a = V.allocation(rows, names)
+        self.assertEqual([n for n, _ in a["kind"]], ["מניות", "קרנות סל", "קרנות (שווי ידני)"])
+        self.assertAlmostEqual(sum(p for _, p in a["kind"]), 100)
+        self.assertEqual(a["currency"][0][0], "שקל")          # 1000 of 1900
+        self.assertEqual(V.allocation([], {}), {"kind": [], "currency": []})
+        self.assertEqual(V.kind_of({}, "Vanguard S&P 500 ETF"), "etf")
+        self.assertEqual(V.kind_of({}, "NVIDIA"), "stock")
+
+
+class TestHomeCost(unittest.TestCase):
+    RATES = {"2026-01-05": 3.70, "2026-06-01": 3.50, "2026-09-01": 3.20}
+
+    def fx_on(self, cur, d):
+        return V.rate_on(sorted(self.RATES.items()), d)
+
+    def test_cost_and_sale_in_shekels(self):
+        d = P.add_transaction(P.empty(), "A", "buy", 10, 100, "USD", "2026-01-05", today=TODAY)
+        d = P.add_transaction(d, "A", "buy", 10, 100, "USD", "2026-06-01", today=TODAY)
+        d = P.add_transaction(d, "A", "sell", 10, 110, "USD", "2026-09-01", today=TODAY)
+        cost, sales = P.home_costs(d, self.fx_on)
+        self.assertAlmostEqual(cost["A"], (3700 + 3500) / 2)        # half the ₪ basis left
+        self.assertEqual(len(sales), 1)
+        self.assertAlmostEqual(sales[0][1], 10 * 110 * 3.20 - 3600)  # a $ gain, a ₪ loss
+        self.assertEqual(P.home_costs(d, lambda c, x: None)[0], {})  # unknown rate
+        ils = P.add_transaction(P.empty(), "B.TA", "buy", 2, 50, "ILS", "2026-01-05", today=TODAY)
+        self.assertEqual(P.home_costs(ils, lambda c, x: None)[0], {"B.TA": 100.0})
+
+    def test_rows_use_buy_day_rate(self):
+        d = P.add_transaction(P.empty(), "A", "buy", 10, 100, "USD", "2026-01-05", today=TODAY)
+        rows, _ = V.value_rows(d, lambda s: (100.0, 0.0, "USD", "A"), lambda c: 3.0,
+                               fx_on=self.fx_on)
+        self.assertAlmostEqual(rows[0]["cost_home"], 3700)
+        self.assertAlmostEqual(P.summarize(rows)["pnl"], 3000 - 3700)   # the dollar fell
+
+
 class FakeFetch:
     def quote(self, s):
         prices = {"MSFT": (500.0, 1.0, "USD"), "TA35.TA": (110.0, 0.5, "ILS"),
@@ -112,6 +156,9 @@ class FakeFetch:
         import pandas as pd
         return SimpleNamespace(found=True, data=pd.DataFrame(
             {"Date": pd.to_datetime(["2026-11-10"]), "Close": [100.0]}))
+
+    def fx_history(self, s):
+        return self.history(s)
 
     def calendar(self, s):
         return {"earnings": "2026-11-21", "ex_dividend": None, "dividend_pay": None,

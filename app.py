@@ -137,6 +137,11 @@ h1, h2, h3, h4 { font-family: "Rubik", "Assistant", system-ui, sans-serif !impor
 .sa-horiz div { background: var(--sa-surface2); border-radius: 12px; padding: 0.45rem; text-align: center; }
 .sa-horiz b { display: block; font-size: 0.95rem; } .sa-horiz span { font-size: 0.75rem; color: var(--sa-muted); }
 .sa-fine { color: var(--sa-muted); font-size: 0.76rem; margin-top: 0.6rem; }
+.sa-group { font-weight: 700; font-size: 0.92rem; margin: 0.9rem 0 0.15rem; padding-bottom: 0.2rem;
+  border-bottom: 1px solid var(--sa-line); }
+.sa-alloc { margin-top: 10px; } .sa-alloc .bar { display: flex; gap: 2px; height: 10px; border-radius: 99px; overflow: hidden; }
+.sa-alloc .lab { display: flex; flex-wrap: wrap; gap: 2px 12px; font-size: 0.8rem; color: var(--sa-muted); margin-top: 3px; }
+.sa-alloc i { display: inline-block; width: 8px; height: 8px; border-radius: 2px; margin-inline-end: 4px; }
 </style>
 """
 st.markdown(APP_CSS, unsafe_allow_html=True)
@@ -505,6 +510,24 @@ def render_metrics(group, keys=None, columns_per_row=3, context=None, labels=Non
                           help=help_text or None)
 
 
+# Hebrew dates on chart axes (Vega would write "Nov", "Wed 12"): times inside a
+# day, "12 נוב׳" for a day, the month at a month start, the year in January.
+HE_MONTHS = "['ינו׳','פבר׳','מרץ','אפר׳','מאי','יוני','יולי','אוג׳','ספט׳','אוק׳','נוב׳','דצמ׳']"
+HE_DATE_EXPR = (
+    "(hours(datum.value) || minutes(datum.value)) ? timeFormat(datum.value, '%H:%M') : "
+    f"date(datum.value) != 1 ? date(datum.value) + ' ' + {HE_MONTHS}[month(datum.value)] : "
+    f"month(datum.value) == 0 ? timeFormat(datum.value, '%Y') : {HE_MONTHS}[month(datum.value)]")
+
+
+def he_date_x(**axis):
+    """The x encoding for a Date column, with Hebrew labels."""
+    return alt.X("Date:T", title=None, axis=alt.Axis(labelExpr=HE_DATE_EXPR, **axis))
+
+
+def he_date_tip():
+    return alt.Tooltip("Date:T", title="תאריך", format="%d.%m.%Y")
+
+
 def make_candlestick(df, pct_first_close=None):
     """
     Build a simple candlestick chart from a price-history table using Altair.
@@ -526,7 +549,7 @@ def make_candlestick(df, pct_first_close=None):
         alt.value("#ef5350"),  # red
     )
     base = alt.Chart(df).encode(
-        x=alt.X("Date:T", title=None),
+        x=he_date_x(),
         color=up_down_color,
     )
 
@@ -578,7 +601,7 @@ def make_candlestick(df, pct_first_close=None):
         .mark_point(opacity=0)  # invisible: we only want its right-hand axis
         .transform_calculate(pct=f"(datum.Close / {pct_first_close} - 1) * 100")
         .encode(
-            x=alt.X("Date:T", title=None),
+            x=he_date_x(),
             y=alt.Y(
                 "pct:Q",
                 title="% change",
@@ -601,7 +624,7 @@ def make_volume_chart(df):
         alt.Chart(df)
         .mark_bar(color="#9aa0a6", opacity=0.6)  # muted grey, semi-transparent
         .encode(
-            x=alt.X("Date:T", title=None),
+            x=he_date_x(),
             # "~s" gives compact SI tick labels (50,000,000 -> "50M").
             y=alt.Y("Volume:Q", title="Volume", axis=alt.Axis(format="~s")),
         )
@@ -959,7 +982,24 @@ def portfolio_rows(data):
             return None
         price, cur = portfolio.to_major(q.price, q.currency)
         return price, q.change_pct, cur, short_name(q.name, sym)
-    return valuation.value_rows(data, quote_fn, load_fx, load_closes)
+    return valuation.value_rows(data, quote_fn, load_fx, load_closes, fx_on=fx_on)
+
+
+@st.cache_data(ttl=6 * 3600, show_spinner=False)
+def load_fx_history(currency):
+    """5 years of daily `currency` -> ₪ rates: [(iso_date, rate)]."""
+    sym = portfolio.fx_symbol(currency)
+    if sym is None:
+        return []
+    try:
+        return valuation.closes_major(engine.get_price_history(sym, "5Y"), "")
+    except Exception:
+        return []
+
+
+def fx_on(currency, day_iso):
+    """The rate on a trade's day (None if unknown -> that stock uses today's)."""
+    return valuation.rate_on(load_fx_history(currency), day_iso)
 
 
 def portfolio_card_html(totals):
@@ -983,8 +1023,8 @@ def portfolio_card_html(totals):
         f'<div class="sa-row"><span class="sa-price sa-num">'
         f'{_esc(portfolio.money(totals["value"], "ILS", 0))}</span>{day}</div>'
         f'<div>{pnl_txt}</div>{missing}'
-        '<div class="sa-fine">מניות במטבע זר מחושבות בשקלים לפי השער של היום. '
-        f'עלות הקנייה מחושבת גם היא לפי השער של היום.</div>{warn}</div>')
+        '<div class="sa-fine">מניות במטבע זר שוות היום לפי השער של היום, והעלות '
+        f'שלהן לפי השער ביום הקנייה, כך שהרווח בשקלים כולל גם את שינוי השער.</div>{warn}</div>')
 
 
 def render_trade_box(symbol, quote):
@@ -1109,12 +1149,22 @@ def render_trades_and_backup():
                     f'<span class="sa-num">{portfolio.money(portfolio.tax_estimate(profit), cur)}</span>'
                     '</span></div>'
                     for cur, profit in sorted(realized.items()))
+                _, sales_home = portfolio.home_costs(data, fx_on)
+                home = [p for d, p in sales_home if d.startswith(str(year))]
+                if home and any(c not in ("", portfolio.HOME_CURRENCY) for c in realized):
+                    total = sum(home)
+                    lines += ('<div class="sa-row" style="justify-content:space-between;'
+                              'border-top:1px solid var(--sa-line);padding-top:6px;margin-top:4px">'
+                              f'<span>בשקלים, לפי השער בימי העסקאות: <b class="sa-num">'
+                              f'{portfolio.money(total, "ILS", signed=True)}</b></span>'
+                              '<span class="sa-sub">מס משוער: <span class="sa-num">'
+                              f'{portfolio.money(portfolio.tax_estimate(total), "ILS")}</span></span></div>')
                 st.markdown(html_safe(
                     f'<div class="sa-card"><div class="sa-eyebrow">רווח ממומש ב-{year} '
                     f'(ממכירות)</div>{lines}</div>'), unsafe_allow_html=True)
-                st.caption("הערכה גסה בלבד: 25% מהרווח נטו בכל מטבע, בלי עמלות, בלי "
-                           "התאמה לאינפלציה ובלי המרה לשקל לפי תאריכי העסקאות. "
-                           "לא ייעוץ מס.")
+                st.caption("הערכה גסה בלבד: 25% מהרווח, בלי עמלות ובלי התאמה לאינפלציה. "
+                           "במס בישראל הרווח על מניה זרה נמדד בשקלים, לכן השורה בשקלים "
+                           "(לפי השער ביום הקנייה וביום המכירה) היא הקרובה יותר. לא ייעוץ מס.")
             elif txs:
                 st.caption(f"עוד אין מכירות ב-{year}, אז אין רווח ממומש.")
         if txs:
@@ -1376,9 +1426,8 @@ def make_price_area(df, as_percent=False):
     y = alt.Y(f"{field_name}:Q", title=title, scale=alt.Scale(domain=[lo - pad, hi + pad], nice=False),
               axis=alt.Axis(format=fmt, grid=True, gridOpacity=0.12, domain=False, ticks=False,
                             labelColor="#8B97AA", tickCount=4))
-    x = alt.X("Date:T", title=None, axis=alt.Axis(grid=False, labelColor="#8B97AA",
-                                                   domain=False, ticks=False, tickCount=4))
-    base = alt.Chart(data).encode(x=x, y=y, tooltip=[alt.Tooltip("Date:T", title="תאריך"),
+    x = he_date_x(grid=False, labelColor="#8B97AA", domain=False, ticks=False, tickCount=4)
+    base = alt.Chart(data).encode(x=x, y=y, tooltip=[he_date_tip(),
                                                     alt.Tooltip(f"{field_name}:Q", format=fmt, title="")])
     area = base.mark_area(
         line={"color": color, "strokeWidth": 2},
@@ -1395,6 +1444,29 @@ def make_price_area(df, as_percent=False):
 def _go_home():
     """Back button: clear the search so the home screen shows."""
     st.session_state["search_box"] = ""
+
+
+def render_portfolio_row(r, names, manual_scores):
+    """One tappable row: a stock opens its page, a fund opens its edit form."""
+    sym = r["symbol"]
+    if r.get("manual"):
+        how = "מוערך לפי המדד" if r.get("estimated") else "שווי ידני"
+        label = (f"**{md_safe(r['name'])}**{score_tag(manual_scores.get(sym), 'מגמה')}\n{how} · "
+                 f"\u2066{md_safe(portfolio.money(r['value'], 'ILS', 0))}\u2069")
+        if r["pnl_pct"] is not None:
+            color = "green" if r["pnl_pct"] >= 0 else "red"
+            label += f" · :{color}[\u2066{r['pnl_pct']:+.1f}%\u2069]"
+        st.button(label, key=f"pf_manual_{sym}", on_click=_edit_manual,
+                  args=(sym[len(portfolio.MANUAL_PREFIX):],), width="stretch")
+        return
+    qty = f"{r['qty']:,.4g}"
+    label = f"**{md_safe(names.get(sym, sym))}**{score_tag(score_for(sym))}\n\u2066{qty}\u2069 מניות"
+    if r["value"] is not None:
+        label += f" · \u2066{md_safe(portfolio.money(r['value'], r['currency'], 0))}\u2069"
+    if r["pnl_pct"] is not None:
+        color = "green" if r["pnl_pct"] >= 0 else "red"
+        label += f" · :{color}[\u2066{r['pnl_pct']:+.1f}%\u2069]"
+    st.button(label, key=f"pf_view_{sym}", on_click=_goto, args=(sym,), width="stretch")
 
 
 def render_portfolio_home():
@@ -1430,27 +1502,14 @@ def render_portfolio_home():
     if holdings:
         render_week_events(holdings, names)
     with st.container(key="portfolio_rows"):
-        for r in rows:
-            sym = r["symbol"]
-            if r.get("manual"):
-                how = "מוערך לפי המדד" if r.get("estimated") else "שווי ידני"
-                label = (f"**{md_safe(r['name'])}**{score_tag(manual_scores.get(sym), 'מגמה')}\n{how} · "
-                         f"\u2066{md_safe(portfolio.money(r['value'], 'ILS', 0))}\u2069")
-                if r["pnl_pct"] is not None:
-                    color = "green" if r["pnl_pct"] >= 0 else "red"
-                    label += f" · :{color}[\u2066{r['pnl_pct']:+.1f}%\u2069]"
-                st.button(label, key=f"pf_manual_{sym}", on_click=_edit_manual,
-                          args=(sym[len(portfolio.MANUAL_PREFIX):],), width="stretch")
-                continue
-            qty = f"{r['qty']:,.4g}"
-            label = f"**{md_safe(names.get(sym, sym))}**{score_tag(score_for(sym))}\n\u2066{qty}\u2069 מניות"
-            if r["value"] is not None:
-                label += f" · \u2066{md_safe(portfolio.money(r['value'], r['currency'], 0))}\u2069"
-            if r["pnl_pct"] is not None:
-                color = "green" if r["pnl_pct"] >= 0 else "red"
-                label += f" · :{color}[\u2066{r['pnl_pct']:+.1f}%\u2069]"
-            st.button(label, key=f"pf_view_{sym}", on_click=_goto, args=(sym,),
-                      width="stretch")
+        for _key, title, group, subtotal in valuation.grouped(rows, names):
+            total_txt = (f' · <span class="sa-num">{_esc(portfolio.money(subtotal, "ILS", 0))}</span>'
+                         if subtotal is not None else "")
+            st.markdown(html_safe(f'<div class="sa-group">{_esc(title)} <span class="sa-sub">'
+                                  f'({len(group)}){total_txt}</span></div>'),
+                        unsafe_allow_html=True)
+            for r in group:
+                render_portfolio_row(r, names, manual_scores)
     render_manual_box(data, {r["symbol"]: r for r in rows if r.get("manual")})
     render_portfolio_overview(rows, names, data,
                               {k: v["score"] for k, v in manual_scores.items() if v})
@@ -1604,6 +1663,22 @@ def _run_ai_overview(sig, facts_payload):
         st.session_state["_ai_overview_failed"] = True
 
 
+ALLOC_COLORS = ("var(--sa-accent)", "#3CC98A", "#F2B04C", "#FF6B6B", "#8B97AA")
+
+
+def alloc_html(title, parts):
+    """A labeled stacked bar: [(label, pct)] -> HTML ('' when empty)."""
+    if not parts:
+        return ""
+    bar = "".join(f'<span style="flex:{p:.2f};background:{ALLOC_COLORS[i % len(ALLOC_COLORS)]}"></span>'
+                  for i, (_, p) in enumerate(parts))
+    lab = "".join(f'<span><i style="background:{ALLOC_COLORS[i % len(ALLOC_COLORS)]}"></i>'
+                  f'{_esc(n)} <span class="sa-num">{p:.0f}%</span></span>'
+                  for i, (n, p) in enumerate(parts))
+    return (f'<div class="sa-alloc"><div class="sa-sub" style="margin-bottom:3px">{_esc(title)}</div>'
+            f'<div class="bar">{bar}</div><div class="lab">{lab}</div></div>')
+
+
 def render_portfolio_overview(rows, names, data=None, manual_scores=None):
     """Facts computed in code + (on request) AI strengths / weaknesses / ideas."""
     scores = {r["symbol"]: score_for(r["symbol"])["score"] for r in rows if not r.get("manual")}
@@ -1615,6 +1690,10 @@ def render_portfolio_overview(rows, names, data=None, manual_scores=None):
         st.markdown("#### מבט על התיק")
         avg = facts["avg_score"]
         top_sym, top_name, top_pct = facts["top"]
+        shown = facts["weights"][:6]   # 23 names was a wall of text: the 6 biggest + the rest
+        rest = sum(p for _, _, p in facts["weights"][6:])
+        if rest > 0.5:
+            shown = shown + [("", f"עוד {len(facts['weights']) - 6}", rest)]
         cells = [
             (f"{avg:+d}" if avg is not None else "—", "ציון ממוצע"),
             (f"{top_pct:.0f}%", "במניה הגדולה"),
@@ -1628,11 +1707,14 @@ def render_portfolio_overview(rows, names, data=None, manual_scores=None):
             + "</div>"
             + '<div style="display:flex;gap:3px;height:10px;border-radius:99px;overflow:hidden">'
             + "".join(f'<span style="flex:{p:.2f};background:var(--sa-accent);opacity:{max(.3, 1 - i * .2):.2f}"></span>'
-                      for i, (_, _, p) in enumerate(facts["weights"]))
+                      for i, (_, _, p) in enumerate(shown))
             + '</div><div class="sa-sub" style="display:flex;flex-wrap:wrap;gap:4px 12px;margin-top:4px">'
             + "".join(f'<span>{_esc(n)} <span class="sa-num">{p:.0f}%</span></span>'
-                      for _, n, p in facts["weights"])
+                      for _, n, p in shown)
             + "</div>", unsafe_allow_html=True)
+        alloc = valuation.allocation(rows, names)
+        st.markdown(alloc_html("לפי סוג", alloc["kind"]) + alloc_html("לפי מטבע", alloc["currency"]),
+                    unsafe_allow_html=True)
         if data:
             render_vs_index(data)
 
@@ -1696,13 +1778,13 @@ def make_vs_index_chart(points, index_name):
     dash = alt.StrokeDash("line:N", legend=None, scale=alt.Scale(
         domain=["התיק שלך", index_name], range=[[1, 0], [4, 3]]))
     return (alt.Chart(df).mark_line(strokeWidth=2.2).encode(
-                x=alt.X("Date:T", title=None, axis=alt.Axis(grid=False, labelColor="#8B97AA",
-                                                            domain=False, ticks=False, tickCount=4)),
+                x=he_date_x(grid=False, labelColor="#8B97AA", domain=False, ticks=False,
+                            tickCount=4),
                 y=alt.Y("pct:Q", title=None, axis=alt.Axis(format="+.0f", grid=True,
                         gridOpacity=0.12, domain=False, ticks=False, labelColor="#8B97AA",
                         tickCount=4, labelExpr="datum.label + '%'")),
                 color=color, strokeDash=dash,
-                tooltip=[alt.Tooltip("Date:T", title="תאריך"), alt.Tooltip("line:N", title=""),
+                tooltip=[he_date_tip(), alt.Tooltip("line:N", title=""),
                          alt.Tooltip("pct:Q", format="+.1f", title="%")])
             .properties(height=170).configure_view(strokeWidth=0)
             .configure(background="transparent"))
