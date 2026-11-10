@@ -26,7 +26,8 @@ SAMPLE = {
     "NVDA": dict(name="NVIDIA Corporation", price=182.40, prev=178.28, cur="USD", ex="NASDAQ",
                  trend=0.0018, seed=3, scores=(71, 78, 80), sector="Technology",
                  analyst=("strong_buy", "Strong Buy", 1.4, 58, 215.0, 260.0, 150.0)),
-    "TEVA.TA": dict(name="Teva Pharmaceutical Industries", price=68.90, prev=68.14, cur="ILS",
+    # Yahoo gives Tel Aviv prices in agorot ("ILA"), so the sample does too.
+    "TEVA.TA": dict(name="Teva Pharmaceutical Industries", price=6890.0, prev=6814.0, cur="ILA",
                     ex="TLV", trend=0.0011, seed=11, scores=(62, 63, 48), sector="Healthcare",
                     analyst=None),
 }
@@ -49,8 +50,13 @@ def _hist(sym, range_key):
                          "Close": close, "Volume": vol})
 
 
+FX = {"ILS=X": 3.72}  # fake dollar rate in shekels
+
+
 def get_stock_quote(t):
     t = (t or "").upper()
+    if t in FX:
+        return engine.StockQuote(True, t, t, FX[t], "ILS", FX[t], 0.0, 0.0, "CCY", "demo", "demo", {})
     if t not in SAMPLE:
         return engine.StockQuote(False, t)
     s = SAMPLE[t]
