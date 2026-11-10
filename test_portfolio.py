@@ -1,14 +1,32 @@
 """
-test_portfolio.py -- offline tests for portfolio.py (no network, no Streamlit).
+test_portfolio.py -- offline tests for portfolio.py (no network, no Streamlit):
+units and money, holdings and valuation, trades, average cost, realized
+profit, tax estimate, the move from the old browser portfolio, backup.
+
+The screens are tested in test_portfolio_ui.py.
+
+Run:  python test_portfolio.py
 """
 
+import json
 import os
 import sys
 import unittest
+from datetime import date, datetime
 
 sys.path.insert(0, os.path.dirname(__file__))
 
 import portfolio as P
+
+pf = P  # the trade tests below use this name
+TODAY = date(2026, 11, 10)
+
+
+def build(*trades):
+    data = pf.empty()
+    for sym, side, qty, price, when, *cur in trades:
+        data = pf.add_transaction(data, sym, side, qty, price, (cur or ["USD"])[0], when, today=TODAY)
+    return data
 
 
 class TestUnits(unittest.TestCase):
@@ -101,56 +119,175 @@ class TestValuation(unittest.TestCase):
         self.assertEqual(t["count"], 0)
 
 
-class TestAppFlow(unittest.TestCase):
-    """Drive the REAL app (AppTest) on the offline sample data in dev/:
-    open a stock, add it to the portfolio, see it on the home screen."""
+class TestAdd(unittest.TestCase):
+    def test_add_returns_new_dict(self):
+        data = pf.empty()
+        new = pf.add_transaction(data, " nvda ", "BUY", "10", "100", "usd", "2026-01-05", today=TODAY)
+        self.assertEqual(data["transactions"], [])
+        tx = new["transactions"][0]
+        self.assertEqual((tx["symbol"], tx["side"], tx["qty"], tx["price"], tx["currency"]),
+                         ("NVDA", "buy", 10.0, 100.0, "USD"))
+        self.assertEqual(tx["date"], "2026-01-05")
+        self.assertTrue(tx["id"])
 
-    @classmethod
-    def setUpClass(cls):
-        os.environ["STOCKAPP_DISABLE_BROWSER_STORAGE"] = "1"
-        os.environ["STOCKAPP_DISABLE_PASSWORD"] = "1"
-        os.environ["STOCKAPP_DISABLE_GEMINI"] = "1"
+    def test_rejects_bad_input(self):
+        bad = [("", "buy", 1, 1, "2026-01-01"), ("X", "hold", 1, 1, "2026-01-01"),
+               ("X", "buy", 0, 1, "2026-01-01"), ("X", "buy", 1, -5, "2026-01-01"),
+               ("X", "buy", "a", 1, "2026-01-01"), ("X", "buy", 1, 1, "not-a-date"),
+               ("X", "buy", 1, 1, "2026-12-01")]  # future
+        for args in bad:
+            with self.assertRaises(pf.PortfolioError, msg=args):
+                pf.add_transaction(pf.empty(), *args[:4], "USD", args[4], today=TODAY)
 
-    def _app(self):
-        from streamlit.testing.v1 import AppTest
-        at = AppTest.from_file(os.path.join(os.path.dirname(__file__), "dev", "demo_app.py"),
-                               default_timeout=60)
-        at.run()
-        self.assertFalse(at.exception, at.exception)
-        return at
+    def test_cannot_sell_more_than_held(self):
+        data = build(("AAPL", "buy", 5, 100, "2026-02-01"))
+        with self.assertRaises(pf.PortfolioError):
+            pf.add_transaction(data, "AAPL", "sell", 6, 120, "USD", "2026-03-01", today=TODAY)
 
-    def _md(self, at):
-        return "\n".join(m.value for m in at.markdown)
+    def test_cannot_sell_before_buying(self):
+        data = build(("AAPL", "buy", 5, 100, "2026-02-01"))
+        with self.assertRaises(pf.PortfolioError):
+            pf.add_transaction(data, "AAPL", "sell", 1, 120, "USD", "2026-01-15", today=TODAY)
 
-    def test_add_holding_then_home_shows_it(self):
-        at = self._app()
-        self.assertIn("עוד אין מניות בתיק", "\n".join(c.value for c in at.caption))
-        at.text_input(key="search_box").set_value("TEVA.TA").run()
-        self.assertFalse(at.exception, at.exception)
-        # The sample TEVA price is 68.90 ILS; the cost field defaults to it.
-        self.assertAlmostEqual(at.number_input(key="pf_cost_TEVA.TA").value, 68.90)
-        at.number_input(key="pf_qty_TEVA.TA").set_value(10)
-        at.number_input(key="pf_cost_TEVA.TA").set_value(60.0)
-        at.button(key="FormSubmitter:pf_form_TEVA.TA-שמור").click().run()
-        self.assertFalse(at.exception, at.exception)
-        self.assertEqual(at.session_state["portfolio"],
-                         [{"symbol": "TEVA.TA", "qty": 10.0, "cost": 60.0}])
-        self.assertIn("נשמר בתיק", "\n".join(x.value for x in at.success))
-        # Back home: the portfolio card shows 10 x 68.90 = ₪689 and the row.
-        at.button(key="back_home").click().run()
-        md = self._md(at)
-        self.assertIn("שווי התיק", md)
-        self.assertIn("₪689", md)
-        labels = [b.label for b in at.button]
-        self.assertTrue(any("10" in l and "מניות" in l for l in labels), labels)
+    def test_same_day_buy_then_sell(self):
+        data = build(("AAPL", "buy", 5, 100, "2026-02-01"), ("AAPL", "sell", 5, 110, "2026-02-01"))
+        res = pf.compute(data)
+        self.assertNotIn("AAPL", res.holdings)
+        self.assertAlmostEqual(res.realized[0].profit, 50.0)
 
-    def test_remove_holding(self):
-        at = self._app()
-        at.session_state["portfolio"] = [{"symbol": "TEVA.TA", "qty": 5.0, "cost": 50.0}]
-        at.text_input(key="search_box").set_value("TEVA.TA").run()
-        at.button(key="pf_rm_TEVA.TA").click().run()
-        self.assertFalse(at.exception, at.exception)
-        self.assertEqual(at.session_state["portfolio"], [])
+
+class TestCompute(unittest.TestCase):
+    def test_average_cost_and_realized(self):
+        data = build(("NVDA", "buy", 10, 100, "2026-01-05"),
+                     ("NVDA", "buy", 10, 200, "2026-02-05"),
+                     ("NVDA", "sell", 5, 180, "2026-03-05"))
+        res = pf.compute(data)
+        h = res.holdings["NVDA"]
+        self.assertAlmostEqual(h.qty, 15)
+        self.assertAlmostEqual(h.avg_cost, 150)   # a sale doesn't change the average
+        self.assertAlmostEqual(h.cost_basis, 2250)
+        self.assertAlmostEqual(res.realized[0].profit, 150)  # (180-150)*5
+        self.assertAlmostEqual(h.realized, 150)
+
+    def test_order_independent_of_entry(self):
+        a = build(("X", "buy", 1, 10, "2026-01-01"), ("X", "buy", 1, 20, "2026-02-01"))
+        b = pf.empty()
+        b = pf.add_transaction(b, "X", "buy", 1, 20, "USD", "2026-02-01", today=TODAY)
+        b = pf.add_transaction(b, "X", "buy", 1, 10, "USD", "2026-01-01", today=TODAY)
+        self.assertAlmostEqual(pf.compute(a).holdings["X"].avg_cost,
+                               pf.compute(b).holdings["X"].avg_cost)
+
+    def test_sold_out_is_not_a_holding(self):
+        data = build(("X", "buy", 3, 10, "2026-01-01"), ("X", "sell", 3, 8, "2026-02-01"))
+        res = pf.compute(data)
+        self.assertEqual(res.holdings, {})
+        self.assertAlmostEqual(res.realized[0].profit, -6)
+
+    def test_remove_transaction(self):
+        data = build(("X", "buy", 3, 10, "2026-01-01"), ("X", "buy", 2, 10, "2026-01-02"))
+        first = data["transactions"][0]["id"]
+        new = pf.remove_transaction(data, first)
+        self.assertEqual(len(new["transactions"]), 1)
+        self.assertEqual(len(data["transactions"]), 2)
+
+    def test_remove_buy_that_a_sale_needs_is_refused(self):
+        data = build(("X", "buy", 3, 10, "2026-01-01"), ("X", "sell", 3, 12, "2026-02-01"))
+        with self.assertRaises(pf.PortfolioError):
+            pf.remove_transaction(data, data["transactions"][0]["id"])
+
+
+class TestYearAndTax(unittest.TestCase):
+    def test_last_year_newest_first(self):
+        data = build(("X", "buy", 1, 10, "2025-06-01"), ("X", "buy", 1, 10, "2026-01-01"),
+                     ("X", "sell", 1, 12, "2026-05-01"))
+        recent = pf.last_year(data["transactions"], today=TODAY)
+        self.assertEqual([t["date"] for t in recent], ["2026-05-01", "2026-01-01"])
+
+    def test_realized_in_year_nets_gains_and_losses_per_currency(self):
+        data = build(("A", "buy", 1, 100, "2026-01-01"), ("A", "sell", 1, 150, "2026-02-01"),
+                     ("B", "buy", 1, 100, "2026-01-01"), ("B", "sell", 1, 80, "2026-03-01"),
+                     ("T", "buy", 10, 50, "2026-01-01", "ILS"), ("T", "sell", 10, 60, "2026-04-01", "ILS"),
+                     ("C", "buy", 1, 10, "2025-01-01"), ("C", "sell", 1, 99, "2025-02-01"))
+        out = pf.realized_in_year(pf.compute(data), 2026)
+        self.assertAlmostEqual(out["USD"], 30)
+        self.assertAlmostEqual(out["ILS"], 100)
+
+    def test_tax_estimate(self):
+        self.assertAlmostEqual(pf.tax_estimate(1000), 250)
+        self.assertEqual(pf.tax_estimate(-500), 0)
+
+
+class TestHoldingsFromTrades(unittest.TestCase):
+    def test_as_holdings_feeds_position(self):
+        data = build(("NVDA", "buy", 10, 100, "2026-01-05"), ("NVDA", "buy", 10, 200, "2026-02-05"),
+                     ("AAPL", "buy", 1, 50, "2026-03-01"), ("AAPL", "sell", 1, 60, "2026-04-01"))
+        hs = pf.as_holdings(pf.compute(data))
+        self.assertEqual(hs, [{"symbol": "NVDA", "qty": 20.0, "cost": 150.0}])
+        row = pf.position(hs[0], 180.0, "USD", None, 3.7)
+        self.assertAlmostEqual(row["pnl"], 600)
+
+    def test_currency_of(self):
+        data = build(("TEVA.TA", "buy", 1, 60, "2026-01-05", "ILS"))
+        self.assertEqual(pf.currency_of(data, "teva.ta"), "ILS")
+        self.assertEqual(pf.currency_of(data, "X"), "")
+
+    def test_from_old_browser_holdings(self):
+        old = [{"symbol": "NVDA", "qty": 20.0, "cost": 118.0},
+               {"symbol": "TEVA.TA", "qty": 300.0, "cost": 52.4},
+               {"symbol": "FREE", "qty": 5.0, "cost": 0.0}]   # cost 0: can't be a buy
+        data = build(("NVDA", "buy", 1, 100, "2026-01-05"))  # already has trades: left alone
+        new = pf.from_holdings(data, old, {"TEVA.TA": "ILS", "NVDA": "USD"}, when=TODAY)
+        added = new["transactions"][1:]
+        self.assertEqual(len(added), 1)
+        self.assertEqual((added[0]["symbol"], added[0]["qty"], added[0]["price"],
+                          added[0]["currency"], added[0]["date"], added[0]["note"]),
+                         ("TEVA.TA", 300.0, 52.4, "ILS", "2026-11-10", "opening"))
+        hs = {h["symbol"]: h for h in pf.as_holdings(pf.compute(new))}
+        self.assertAlmostEqual(hs["TEVA.TA"]["cost"], 52.4)
+
+
+class TestBackup(unittest.TestCase):
+    def test_round_trip(self):
+        data = build(("NVDA", "buy", 10, 100, "2026-01-05"), ("NVDA", "sell", 2, 120, "2026-02-05"))
+        text = pf.make_backup(data, ["NVDA", "aapl"], now=datetime(2026, 11, 10, 9, 0))
+        back, wl = pf.parse_backup(text)
+        self.assertEqual(back["transactions"], data["transactions"])
+        self.assertEqual(wl, ["NVDA", "AAPL"])
+        self.assertEqual(json.loads(text)["created"], "2026-11-10T09:00:00")
+
+    def test_rejects_other_files(self):
+        for text in ["not json", "[]", json.dumps({"kind": "other"}),
+                     json.dumps({"kind": pf.BACKUP_KIND, "portfolio": {"transactions": [{"symbol": "X"}]}})]:
+            with self.assertRaises(pf.PortfolioError, msg=text):
+                pf.parse_backup(text)
+
+    def test_rejects_impossible_trades(self):
+        doc = {"kind": pf.BACKUP_KIND, "portfolio": {"transactions": [
+            {"symbol": "X", "side": "sell", "qty": 1, "price": 1, "date": "2026-01-01"}]}}
+        with self.assertRaises(pf.PortfolioError):
+            pf.parse_backup(json.dumps(doc))
+
+
+class TestBackupReminderAndStoredData(unittest.TestCase):
+    def test_reminder(self):
+        from datetime import datetime, timedelta
+        now = datetime(2026, 11, 10, 9, 30)
+        self.assertFalse(P.needs_backup_reminder(None, now, has_data=False))
+        self.assertTrue(P.needs_backup_reminder(None, now, has_data=True))
+        self.assertFalse(P.needs_backup_reminder((now - timedelta(days=2)).isoformat(), now, True))
+        self.assertTrue(P.needs_backup_reminder((now - timedelta(days=6)).isoformat(), now, True))
+        self.assertTrue(P.needs_backup_reminder("garbage", now, True))
+
+    def test_clean_data(self):
+        good = {"transactions": [{"symbol": "aapl", "side": "buy", "qty": 2,
+                                  "price": 200, "currency": "usd", "date": "2026-01-05"}]}
+        data = P.clean_data(good)
+        self.assertEqual(data["transactions"][0]["symbol"], "AAPL")
+        for bad in (None, [], {"transactions": "x"},
+                    {"transactions": [{"symbol": "A", "side": "sell", "qty": 1,
+                                       "price": 1, "date": "2026-01-01"}]}):
+            with self.assertRaises(P.PortfolioError):
+                P.clean_data(bad)
 
 
 if __name__ == "__main__":

@@ -76,12 +76,19 @@ stock opens as one scroll: header, green/red chart, the "bottom line" card,
 Wall Street, 6 key numbers, then collapsed sections (AI, all data,
 technicals, holders). Missing values show "—"; the Debug panel appears only
 with `?debug=1`. Tel-Aviv prices show in ₪ (Yahoo quotes them in agorot).
-On a stock page, "הוספה לתיק" records how many shares and the average buy
-price; `portfolio.py` does the math (foreign stocks converted to ₪ at
-today's rate). Portfolio and watchlist are saved in the browser on that
-device. Because Safari on iPhone wipes site data after ~7 days without a
-visit, the home screen has **גיבוי ושחזור** (`backup.py`): save a backup file
-or copy its text, and restore it on any device; a reminder shows when there
+On a stock page, "רישום קנייה / מכירה" logs a trade (buy/sell, shares,
+price, date). `portfolio.py` works out the holdings (average cost), realized
+profit and a rough 25% tax estimate, and converts foreign stocks to ₪ at
+today's rate. Where the trades are saved (`app.portfolio_backend()`):
+until the private data repo is connected they stay **in the browser on that
+device** (never in a server folder: on Streamlit Cloud that folder is shared
+by everyone with the link and wiped on every redeploy); once `DATA_REPO` +
+token are set they go to `data/portfolio.json` in the private repo through
+`data_store.py`. A portfolio saved by the older qty-only version is turned
+into "opening" trades automatically, once. The watchlist is saved in the
+browser too. Because Safari on iPhone wipes site data after ~7 days without
+a visit, the home screen has **גיבוי ושחזור**: download a backup file or copy
+its text, restore from a file or pasted text, and a reminder shows when there
 is data and no backup in the last 6 days. Colors live in `.streamlit/config.toml`, the layout CSS at
 the top of `app.py`. Some engine texts (signal names, tooltips) are still
 English.
@@ -124,8 +131,8 @@ venv\Scripts\python test_app.py      # chart builder, no network (fast)
 venv\Scripts\python test_scan.py     # screener rows, no network
 venv\Scripts\python test_data_store.py  # data store (local + mocked GitHub)
 venv\Scripts\python test_daily_job.py   # daily run: guard, history, ranking, Telegram (mocked)
-venv\Scripts\python test_portfolio.py    # portfolio math + app flow on sample data (offline)
-venv\Scripts\python test_backup.py       # backup/restore + reminder, incl. app flow (offline)
+venv\Scripts\python test_portfolio.py    # portfolio math: trades, P/L, tax, backup, reminder (offline)
+venv\Scripts\python test_portfolio_ui.py # portfolio screens on sample data (AppTest, offline)
 venv\Scripts\python test_rank.py     # screener ranking + resume, no network
 ```
 

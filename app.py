@@ -14,6 +14,7 @@ import html
 import hmac
 import json
 import os
+from datetime import date, datetime
 
 import altair as alt  # charting library that ships with Streamlit
 import pandas as pd
@@ -22,10 +23,8 @@ import streamlit as st
 import engine  # our pure-Python data engine (no Streamlit inside it)
 import gemini_helper  # OPTIONAL Gemini explanation layer (no-op without a key)
 import famous_investors  # famous-investor 13F holdings from SEC EDGAR (no key)
-import portfolio  # the user's holdings: units, P&L, totals in ₪ (pure Python)
-import backup  # backup & restore text for portfolio + watchlist (pure Python)
-from datetime import datetime
-from zoneinfo import ZoneInfo
+import data_store  # where our own data lives (local folder now, private repo later)
+import portfolio  # the user's trades -> holdings, P&L, tax, totals in ₪ (pure Python)
 
 # Basic page configuration (title shown in the browser tab, etc.).
 st.set_page_config(page_title="המניות שלי", page_icon="📈",
@@ -81,9 +80,10 @@ h1, h2, h3, h4 { font-family: "Rubik", "Assistant", system-ui, sans-serif !impor
   background: var(--sa-surface2); border-radius: 14px; padding: 0.45rem 0.7rem; }
 
 /* Watchlist rows on the home screen: full-width buttons that read as list rows. */
-.st-key-watchlist button { justify-content: flex-start; text-align: right; border-radius: 14px;
+.st-key-watchlist button, .st-key-portfolio_rows button { justify-content: flex-start; text-align: right; border-radius: 14px;
   background: var(--sa-surface); border: 1px solid var(--sa-line); padding: 0.7rem 0.9rem; }
-.st-key-watchlist button p { font-size: 1rem; }
+.st-key-watchlist button p, .st-key-portfolio_rows button p { font-size: 1rem; }
+.sa-warn { color: var(--sa-hold); font-size: 0.8rem; margin-top: 0.5rem; }
 
 /* Small HTML cards. */
 .sa-card { background: var(--sa-surface); border: 1px solid var(--sa-line); border-radius: 20px;
@@ -618,90 +618,157 @@ def _goto(symbol):
     st.session_state["pending_query"] = symbol
 
 
-# --- Portfolio (mockup item 4): stored in the browser like the watchlist ---
+# --- Portfolio: the trades, kept with data_store --------------------------
+#
+# What's saved is the list of buys and sells, in data/portfolio.json via
+# data_store: the local_data folder today, the PRIVATE GitHub repo once
+# DATA_REPO + DATA_REPO_TOKEN are set. The holdings, profit and tax are
+# worked out from the trades in portfolio.py; this part only draws them.
+#
+# The first version kept "qty + average price" in the browser (Safari wipes
+# that after 7 days). migrate_browser_portfolio() moves it into trades once.
 
-PORTFOLIO_KEY = "portfolio"
-
-
-def init_portfolio(ls):
-    """Load the holdings into session_state once (from localStorage)."""
-    if ls is not None and not st.session_state.get("_pf_loaded"):
-        raw = ls.getItem(PORTFOLIO_KEY)
-        if raw is not None:
-            st.session_state["portfolio"] = portfolio.parse(raw)
-            st.session_state["_pf_loaded"] = True
-    st.session_state.setdefault("portfolio", [])
-
-
-LAST_BACKUP_KEY = "last_backup"
-ISRAEL_TZ = ZoneInfo("Asia/Jerusalem")
+PORTFOLIO_KEY = "portfolio"  # the old browser key (read once, then cleared)
+SIDE_HE = {"buy": "קנייה", "sell": "מכירה"}
 
 
-def _now():
-    return datetime.now(ISRAEL_TZ)
+def html_safe(text):
+    """Two '$' on a line turn into a math formula in Streamlit markdown:
+    use the HTML entity in our HTML snippets."""
+    return str(text).replace("$", "&#36;")
 
 
-def init_last_backup(ls):
-    """When the user last saved a backup on this device (ISO text) or None."""
-    if ls is not None and not st.session_state.get("_bk_loaded"):
-        raw = ls.getItem(LAST_BACKUP_KEY)
-        if raw is not None:
-            st.session_state["last_backup"] = str(raw).strip('"') or None
-            st.session_state["_bk_loaded"] = True
-    st.session_state.setdefault("last_backup", None)
+def md_safe(text):
+    """Same for plain markdown (button labels, captions)."""
+    return str(text).replace("$", "\\$")
 
 
-def _mark_backup():
-    """Download / 'I copied it' callback: remember the backup time."""
-    st.session_state["last_backup"] = _now().isoformat(timespec="seconds")
-    st.session_state["_bk_dirty"] = True
+def _store_kwargs():
+    repo, token = get_data_store_config()
+    # STOCKAPP_DATA_DIR is a test seam: tests keep their data in a temp folder.
+    return {"repo": repo, "token": token,
+            "local_dir": os.environ.get("STOCKAPP_DATA_DIR") or None}
 
 
-def _restore_backup():
-    """Restore callback: an uploaded file wins over pasted text."""
-    upload = st.session_state.get("restore_file")
-    text = upload.getvalue() if upload is not None else st.session_state.get("restore_text", "")
-    try:
-        restored = backup.parse_backup(text)
-    except backup.BackupError as exc:
-        st.session_state["_bk_msg"] = ("error", str(exc))
+def storage_is_local():
+    repo, token = get_data_store_config()
+    return data_store.backend_name(repo, token) == "local"
+
+
+# Where the trades live:
+#   "repo"    -> the PRIVATE GitHub data repo (once DATA_REPO + token are set)
+#   "dir"     -> a folder on the server (STOCKAPP_DATA_DIR; used by the tests)
+#   "browser" -> this device's browser (the default until the repo is set up).
+# Why not a server folder by default: on Streamlit Cloud that folder is SHARED
+# by everyone who opens the public link, and it is wiped on every redeploy.
+TRADES_KEY = "portfolio_trades"   # browser key for the trades document
+_LS = None                        # the browser storage handle (set below)
+
+
+def portfolio_backend():
+    if not storage_is_local():
+        return "repo"
+    if os.environ.get("STOCKAPP_DATA_DIR"):
+        return "dir"
+    return "browser"
+
+
+def load_portfolio():
+    """The trades, read once per visit. On a read error we show it and keep
+    the saved copy untouched (nothing is written until a read works)."""
+    if "portfolio" not in st.session_state:
+        if portfolio_backend() == "browser":
+            raw = _LS.getItem(TRADES_KEY) if _LS is not None else None
+            if raw is None:
+                # Nothing saved yet -- or the browser component hasn't answered
+                # yet (it does on the next rerun), so don't cache the empty one.
+                if _LS is None:
+                    st.session_state["portfolio"] = portfolio.empty()
+                return st.session_state.get("portfolio", portfolio.empty())
+            try:
+                obj = json.loads(raw) if isinstance(raw, str) else raw
+                st.session_state["portfolio"] = portfolio.clean_data(obj)
+                st.session_state.pop("portfolio_error", None)
+            except (ValueError, portfolio.PortfolioError) as exc:
+                st.session_state["portfolio_error"] = str(exc)
+                return portfolio.empty()
+            return st.session_state["portfolio"]
+        try:
+            st.session_state["portfolio"] = data_store.read_json(
+                portfolio.STORE_PATH, portfolio.empty(), **_store_kwargs())
+            st.session_state.pop("portfolio_error", None)
+        except data_store.DataStoreError as exc:
+            st.session_state["portfolio_error"] = str(exc)
+            return portfolio.empty()
+    return st.session_state["portfolio"]
+
+
+def update_portfolio(change, message="Update portfolio"):
+    """Read the LATEST saved copy, apply change(data) -> new data, save it.
+    Reading first means trades saved from another device are never
+    overwritten. Raises PortfolioError / DataStoreError for the caller."""
+    if portfolio_backend() == "browser":
+        if st.session_state.get("portfolio_error"):
+            raise data_store.DataStoreError("the saved portfolio couldn't be read")
+        new = change(load_portfolio())
+        st.session_state["portfolio"] = new
+        st.session_state["_trades_dirty"] = True   # written at the end of the run
+        return new
+    kw = _store_kwargs()
+    current = data_store.read_json(portfolio.STORE_PATH, portfolio.empty(), **kw)
+    new = change(current)
+    data_store.write_json(portfolio.STORE_PATH, new, message, **kw)
+    st.session_state["portfolio"] = new
+    st.session_state.pop("portfolio_error", None)
+    return new
+
+
+def persist_trades(ls):
+    """Browser backend: write the trades document (end of the run)."""
+    if ls is None or "portfolio" not in st.session_state:
         return
-    st.session_state["portfolio"] = restored["portfolio"]
-    st.session_state["watchlist"] = restored["watchlist"]
-    st.session_state["_pf_dirty"] = True
-    st.session_state["_wl_dirty"] = True
-    st.session_state["restore_text"] = ""
-    st.session_state["_bk_msg"] = ("ok", "שוחזר: " + backup.summary(restored))
-
-
-def persist_portfolio(ls):
-    if ls is None:
-        return
     try:
-        ls.setItem(PORTFOLIO_KEY, portfolio.dumps(st.session_state["portfolio"]),
-                   key="portfolio_persist")
+        ls.setItem(TRADES_KEY, json.dumps(st.session_state["portfolio"], ensure_ascii=False),
+                   key="trades_persist")
     except Exception:
         pass
 
 
-def _save_holding(symbol):
-    """Form callback: store qty + average cost typed on the stock page."""
-    qty = st.session_state.get(f"pf_qty_{symbol}") or 0
-    cost = st.session_state.get(f"pf_cost_{symbol}") or 0
+def migrate_browser_portfolio(ls):
+    """Once: the old browser portfolio (qty + average price) -> opening
+    trades dated today. The browser copy is cleared only after the save works.
+    `_test_browser_portfolio` in session_state stands in for the browser in tests."""
+    if st.session_state.get("_pf_migrated"):
+        return
+    raw = (ls.getItem(PORTFOLIO_KEY) if ls is not None
+           else st.session_state.pop("_test_browser_portfolio", None))
+    if raw is None:
+        return  # nothing stored, or the browser component hasn't loaded yet
+    st.session_state["_pf_migrated"] = True
+    old = portfolio.parse(raw)
+    if not old:
+        return
+    currencies = {}
+    for h in old:
+        try:
+            q = load_quote(h["symbol"])
+            currencies[h["symbol"]] = portfolio.to_major(q.price, q.currency)[1] if q.found else ""
+        except Exception:
+            currencies[h["symbol"]] = ""
     try:
-        st.session_state["portfolio"] = portfolio.upsert(
-            st.session_state.get("portfolio", []), symbol, float(qty), float(cost))
-        st.session_state["_pf_msg"] = ("saved" if qty > 0 else "removed", symbol)
-    except ValueError:
-        st.session_state["_pf_msg"] = ("error", symbol)
-    st.session_state["_pf_dirty"] = True
-
-
-def _remove_holding(symbol):
-    st.session_state["portfolio"] = portfolio.remove(
-        st.session_state.get("portfolio", []), symbol)
-    st.session_state["_pf_msg"] = ("removed", symbol)
-    st.session_state["_pf_dirty"] = True
+        update_portfolio(lambda d: portfolio.from_holdings(d, old, currencies),
+                         "Move portfolio from the browser")
+    except (portfolio.PortfolioError, data_store.DataStoreError):
+        st.session_state["_pf_migrated"] = False  # keep the browser copy; retry next visit
+        return
+    st.session_state["_pf_moved"] = len(old)
+    if ls is not None:
+        if portfolio_backend() == "browser":
+            persist_trades(ls)  # save the trades BEFORE clearing the old key
+        try:
+            ls.setItem(PORTFOLIO_KEY, "[]", key="portfolio_clear")
+        except Exception:
+            pass
 
 
 @st.cache_data(ttl=600)
@@ -737,23 +804,224 @@ def portfolio_rows(holdings):
 
 def portfolio_card_html(totals):
     """The 'My portfolio' summary card (total in ₪, today, total P&L)."""
+    warn = ('<div class="sa-warn">⚠️ התיק נשמר רק בדפדפן במכשיר הזה. עד שנחבר '
+            'את המאגר הפרטי, כדאי לשמור גיבוי (למטה, ב״גיבוי ושחזור״).</div>'
+            if storage_is_local() else "")
     if totals["value"] is None:
         return ('<div class="sa-card"><div class="sa-eyebrow">שווי התיק</div>'
-                '<div class="sa-sub">אין מחירים זמינים כרגע.</div></div>')
+                f'<div class="sa-sub">אין מחירים זמינים כרגע.</div>{warn}</div>')
     day = (chip_html(totals["day_pct"], "%") + ' <span class="sa-sub">היום</span>'
            if totals["day_pct"] is not None else "")
     pnl = totals["pnl"]
     pnl_txt = (f'<span class="sa-sub">סה״כ רווח/הפסד: <span class="sa-num">'
-               f'{_esc(portfolio.money(pnl, "ILS", 0))}</span></span> '
+               f'{_esc(portfolio.money(pnl, "ILS", 0, signed=True))}</span></span> '
                + chip_html(totals["pnl_pct"], "%")) if pnl is not None else ""
     missing = (f'<div class="sa-fine">בלי מחיר כרגע: {_esc(", ".join(totals["missing"]))}</div>'
                if totals["missing"] else "")
-    return ('<div class="sa-card"><div class="sa-eyebrow">שווי התיק</div>'
-            f'<div class="sa-row"><span class="sa-price sa-num">'
-            f'{_esc(portfolio.money(totals["value"], "ILS", 0))}</span>{day}</div>'
-            f'<div>{pnl_txt}</div>{missing}'
-            '<div class="sa-fine">מניות במטבע זר מחושבות בשקלים לפי השער של היום. '
-            'עלות הקנייה מחושבת גם היא לפי השער של היום.</div></div>')
+    return html_safe(
+        '<div class="sa-card"><div class="sa-eyebrow">שווי התיק</div>'
+        f'<div class="sa-row"><span class="sa-price sa-num">'
+        f'{_esc(portfolio.money(totals["value"], "ILS", 0))}</span>{day}</div>'
+        f'<div>{pnl_txt}</div>{missing}'
+        '<div class="sa-fine">מניות במטבע זר מחושבות בשקלים לפי השער של היום. '
+        f'עלות הקנייה מחושבת גם היא לפי השער של היום.</div>{warn}</div>')
+
+
+def render_trade_box(symbol, quote):
+    """Stock page: what I hold in this stock + a form to log a buy or sell."""
+    data = load_portfolio()
+    price, currency = portfolio.to_major(quote.price, quote.currency)
+    try:
+        held = portfolio.compute(data).holdings.get(symbol)
+    except portfolio.PortfolioError:
+        held = None
+    if held is not None:
+        row = portfolio.position({"symbol": symbol, "qty": held.qty, "cost": held.avg_cost},
+                                 price, currency, quote.change_pct)
+        st.markdown(html_safe(
+            '<div class="sa-card"><div class="sa-row" style="justify-content:space-between">'
+            f'<span class="sa-eyebrow">בתיק שלי</span>{chip_html(row["pnl_pct"], "%")}</div>'
+            '<div class="sa-horiz" style="margin-top:0.5rem">'
+            f'<div><b class="sa-num">{held.qty:,.4g}</b><span>מניות</span></div>'
+            f'<div><b class="sa-num">{_esc(portfolio.money(held.avg_cost, held.currency or currency))}</b>'
+            '<span>מחיר קנייה ממוצע</span></div>'
+            f'<div><b class="sa-num">{_esc(portfolio.money(row["value"], currency, 0))}</b>'
+            '<span>שווי היום</span></div></div></div>'), unsafe_allow_html=True)
+
+    done = st.session_state.pop("_trade_saved", None)
+    if done and done[0] == symbol:
+        st.success(done[1])
+    title = "📝 רישום קנייה / מכירה" if held is not None else "+ הוספה לתיק (רישום קנייה)"
+    with st.expander(title, expanded=False):
+        if st.session_state.get("portfolio_error"):
+            st.error("התיק השמור לא נקרא, אז אי אפשר לשמור עסקה כרגע. נסה לרענן.")
+            return
+        # A stock that's already in the portfolio keeps the currency its
+        # trades were typed in.
+        currency = portfolio.currency_of(data, symbol) or currency
+        unit = portfolio.CURRENCY_SYMBOLS.get(currency, currency)
+        with st.form(f"trade_form_{symbol}", clear_on_submit=True, border=False):
+            side_he = st.segmented_control("סוג העסקה", ["קנייה", "מכירה"], default="קנייה",
+                                           key=f"trade_side_{symbol}")
+            col_qty, col_price = st.columns(2)
+            qty = col_qty.number_input("כמות מניות", min_value=0.0, value=None, step=1.0,
+                                       format="%g", key=f"trade_qty_{symbol}")
+            px = col_price.number_input(f"מחיר למניה ({unit})", min_value=0.0,
+                                        value=round(price, 2) if price else None,
+                                        step=0.01, format="%.2f", key=f"trade_price_{symbol}")
+            when = st.date_input("תאריך העסקה", value=date.today(), max_value=date.today(),
+                                 format="DD/MM/YYYY", key=f"trade_date_{symbol}")
+            submitted = st.form_submit_button("שמור עסקה", type="primary", width="stretch")
+        st.caption((f"יש לך עכשיו {held.qty:,.4g} מניות. " if held is not None else "")
+                   + "המחיר מולא לפי המחיר הנוכחי, אפשר לשנות.")
+        if submitted:
+            side = "sell" if side_he == "מכירה" else "buy"
+            try:
+                update_portfolio(lambda d: portfolio.add_transaction(
+                    d, symbol, side, qty, px, currency, when), f"{side} {symbol}")
+            except portfolio.PortfolioError as exc:
+                st.error(str(exc))
+            except data_store.DataStoreError:
+                st.error("השמירה נכשלה (בעיה באחסון). העסקה לא נשמרה, נסה שוב.")
+            else:
+                st.session_state["_trade_saved"] = (
+                    symbol, f"נשמר: {SIDE_HE[side]} של {qty:g} מניות {symbol}.")
+                st.rerun()
+
+
+def _tx_label(t):
+    return (f"{t['date']} · {SIDE_HE.get(t['side'], t['side'])} · {t['symbol']} · "
+            f"{t['qty']:g} × {portfolio.money(t['price'], t.get('currency'))}")
+
+
+LAST_BACKUP_KEY = "last_backup"
+
+
+def init_last_backup(ls):
+    """When a backup was last saved on this device (ISO text) or None."""
+    if ls is not None and not st.session_state.get("_bk_loaded"):
+        raw = ls.getItem(LAST_BACKUP_KEY)
+        if raw is not None:
+            st.session_state["last_backup"] = str(raw).strip('"') or None
+            st.session_state["_bk_loaded"] = True
+    st.session_state.setdefault("last_backup", None)
+
+
+def _mark_backup():
+    """Download / 'I copied it' / restore: remember the backup time."""
+    st.session_state["last_backup"] = datetime.now().isoformat(timespec="seconds")
+    st.session_state["_bk_dirty"] = True
+
+
+def render_trades_and_backup():
+    """Home, bottom: the last year's trades + tax estimate, and backup/restore."""
+    data = load_portfolio()
+    txs = data.get("transactions", [])
+    with st.expander("🧾 עסקאות ומס (שנה אחרונה)", expanded=False):
+        recent = portfolio.last_year(txs)
+        if not recent:
+            st.caption("עוד אין עסקאות מהשנה האחרונה.")
+        else:
+            table = pd.DataFrame([{
+                "תאריך": date.fromisoformat(t["date"]).strftime("%d/%m/%y"),
+                "מניה": t["symbol"],
+                "פעולה": ("יתרת פתיחה" if t.get("note") == "opening"
+                          else SIDE_HE.get(t["side"], t["side"])),
+                "כמות": f"{t['qty']:g}", "מחיר": portfolio.money(t["price"], t.get("currency")),
+            } for t in recent])
+            st.dataframe(table, hide_index=True, width="stretch")
+            if any(t.get("note") == "opening" for t in txs):
+                st.caption("״יתרת פתיחה״ = מניות שהוזנו קודם רק עם כמות ומחיר ממוצע, "
+                           "בלי תאריך. אפשר למחוק אותן ולהזין את הקניות האמיתיות.")
+        try:
+            result = portfolio.compute(data)
+        except portfolio.PortfolioError as exc:
+            st.error(f"יש בעיה ברשימת העסקאות: {exc}")
+            result = None
+        year = date.today().year
+        if result is not None:
+            realized = portfolio.realized_in_year(result, year)
+            if realized:
+                lines = "".join(
+                    '<div class="sa-row" style="justify-content:space-between">'
+                    f'<span>רווח <b class="sa-num">{portfolio.money(profit, cur, signed=True)}</b></span>'
+                    '<span class="sa-sub">מס משוער (25%): '
+                    f'<span class="sa-num">{portfolio.money(portfolio.tax_estimate(profit), cur)}</span>'
+                    '</span></div>'
+                    for cur, profit in sorted(realized.items()))
+                st.markdown(html_safe(
+                    f'<div class="sa-card"><div class="sa-eyebrow">רווח ממומש ב-{year} '
+                    f'(ממכירות)</div>{lines}</div>'), unsafe_allow_html=True)
+                st.caption("הערכה גסה בלבד: 25% מהרווח נטו בכל מטבע, בלי עמלות, בלי "
+                           "התאמה לאינפלציה ובלי המרה לשקל לפי תאריכי העסקאות. "
+                           "לא ייעוץ מס.")
+            elif txs:
+                st.caption(f"עוד אין מכירות ב-{year}, אז אין רווח ממומש.")
+        if txs:
+            by_id = {t["id"]: t for t in txs}
+            pick = st.selectbox("מחיקת עסקה שהוזנה בטעות", options=list(by_id),
+                                index=None, placeholder="בחר עסקה…",
+                                format_func=lambda i: _tx_label(by_id[i]), key="tx_delete_pick")
+            if pick and st.button("🗑️ מחק את העסקה", key="tx_delete_btn"):
+                try:
+                    update_portfolio(lambda d: portfolio.remove_transaction(d, pick),
+                                     "Remove trade")
+                    st.session_state.pop("tx_delete_pick", None)
+                    st.rerun()
+                except portfolio.PortfolioError as exc:
+                    st.error(str(exc))
+                except data_store.DataStoreError:
+                    st.error("המחיקה נכשלה (בעיה באחסון). נסה שוב.")
+
+    watchlist = st.session_state.get("watchlist", [])
+    last = st.session_state.get("last_backup")
+    if storage_is_local() and portfolio.needs_backup_reminder(
+            last, datetime.now(), bool(txs or watchlist)):
+        st.warning("💾 כדאי לשמור גיבוי: התיק ורשימת המעקב נשמרים רק בדפדפן, "
+                   "וספארי באייפון מוחק אותם אחרי כשבוע בלי כניסה. פתח את "
+                   "**גיבוי ושחזור** למטה.")
+    with st.expander("💾 גיבוי ושחזור", expanded=False):
+        backup_text = portfolio.make_backup(data, watchlist)
+        if storage_is_local():
+            st.caption("כרגע התיק ורשימת המעקב נשמרים רק בדפדפן במכשיר הזה. גיבוי "
+                       "שומר אותם בקובץ או כטקסט, ואפשר לשחזר אותם בכל מכשיר.")
+        st.download_button(
+            "⬇️ הורד קובץ גיבוי", data=backup_text,
+            file_name=f"stock-app-backup-{date.today().isoformat()}.json",
+            mime="application/json", key="backup_download", width="stretch",
+            on_click=_mark_backup)
+        st.caption("הקובץ כולל את כל העסקאות ואת רשימת המעקב. באייפון הוא נשמר "
+                   "באפליקציית ״קבצים״. אפשר גם להעתיק את הטקסט (כפתור ההעתקה "
+                   "בפינה) ולשמור אותו, למשל בפתקים:")
+        st.code(backup_text, language="json")
+        st.button("✓ העתקתי ושמרתי", key="backup_copied", on_click=_mark_backup)
+        if last:
+            try:
+                when = datetime.fromisoformat(last).strftime("%d.%m.%Y %H:%M")
+            except ValueError:
+                when = last
+            st.caption(f"גיבוי אחרון: \u2066{when}\u2069")
+        upload = st.file_uploader("שחזור מקובץ גיבוי", type=["json"], key="backup_upload")
+        pasted = st.text_area("או הדבק כאן את טקסט הגיבוי", key="restore_text", height=90)
+        source = (upload.getvalue().decode("utf-8", "replace") if upload is not None
+                  else (pasted or "").strip())
+        if source:
+            try:
+                restored, wl = portfolio.parse_backup(source)
+            except portfolio.PortfolioError as exc:
+                st.error(str(exc))
+            else:
+                st.info(f"בקובץ: {len(restored['transactions'])} עסקאות ו-{len(wl)} מניות "
+                        "במעקב. השחזור מחליף את מה שיש עכשיו.")
+                if st.button("שחזר", key="backup_restore_btn", type="primary"):
+                    try:
+                        update_portfolio(lambda _d: restored, "Restore from backup")
+                        st.session_state["watchlist"] = wl
+                        st.session_state["_wl_dirty"] = True
+                        st.success("שוחזר.")
+                        _mark_backup()
+                    except data_store.DataStoreError:
+                        st.error("השחזור נכשל (בעיה באחסון). נסה שוב.")
 
 
 # --- Home screen + small HTML building blocks ----------------------------
@@ -823,7 +1091,7 @@ def header_card_html(quote):
         f'<div class="sa-name">{_esc(quote.name or quote.symbol)}</div>'
         f'<div class="sa-sub"><span class="sa-num">{_esc(quote.symbol)}</span> · '
         f'{_esc(quote.exchange or "")}</div>'
-        f'<div class="sa-row"><span class="sa-price sa-num">{_esc(price)}</span>{today}</div>'
+        f'<div class="sa-row"><span class="sa-price sa-num">{html_safe(_esc(price))}</span>{today}</div>'
     )
 
 
@@ -964,10 +1232,23 @@ def _go_home():
 def render_portfolio_home():
     """'My portfolio' on the home screen: the summary card + one row per stock."""
     st.markdown("#### התיק שלי")
-    holdings = st.session_state.get("portfolio", [])
+    data = load_portfolio()
+    if st.session_state.get("portfolio_error"):
+        st.error("לא הצלחתי לקרוא את התיק השמור, אז לא מציג ולא שומר שינויים כרגע. "
+                 "נסה לרענן בעוד רגע.")
+        return
+    moved = st.session_state.pop("_pf_moved", None)
+    if moved:
+        st.success(f"העברתי {moved} מניות מהתיק שנשמר בדפדפן לשמירה החדשה, "
+                   "כ״יתרת פתיחה״ עם התאריך של היום.")
+    try:
+        holdings = portfolio.as_holdings(portfolio.compute(data))
+    except portfolio.PortfolioError as exc:
+        st.error(f"יש בעיה ברשימת העסקאות: {exc}")
+        return
     if not holdings:
         st.caption("עוד אין מניות בתיק. פתח מניה ולחץ **הוספה לתיק** כדי לרשום "
-                   "כמה מניות קנית ובאיזה מחיר.")
+                   "קנייה: כמה מניות, באיזה מחיר ומתי.")
         return
     rows, names = portfolio_rows(holdings)
     st.markdown(portfolio_card_html(portfolio.summarize(rows)), unsafe_allow_html=True)
@@ -977,49 +1258,12 @@ def render_portfolio_home():
             qty = f"{r['qty']:,.4g}"
             label = f"**{names.get(sym, sym)}** · \u2066{qty}\u2069 מניות"
             if r["value"] is not None:
-                label += f" · \u2066{portfolio.money(r['value'], r['currency'], 0)}\u2069"
+                label += f" · \u2066{md_safe(portfolio.money(r['value'], r['currency'], 0))}\u2069"
             if r["pnl_pct"] is not None:
                 color = "green" if r["pnl_pct"] >= 0 else "red"
                 label += f" · :{color}[\u2066{r['pnl_pct']:+.1f}%\u2069]"
             st.button(label, key=f"pf_view_{sym}", on_click=_goto, args=(sym,),
                       width="stretch")
-
-
-def render_backup_home():
-    """'Backup & restore' on the home screen (mockup item 9)."""
-    holdings = st.session_state.get("portfolio", [])
-    watchlist = st.session_state.get("watchlist", [])
-    msg = st.session_state.pop("_bk_msg", None)
-    if msg:
-        (st.success if msg[0] == "ok" else st.error)(msg[1])
-    last = st.session_state.get("last_backup")
-    if backup.needs_reminder(last, _now(), bool(holdings or watchlist)):
-        st.warning("💾 כדאי לשמור גיבוי: ספארי באייפון מוחק את הנתונים של האתר "
-                   "אחרי כשבוע בלי כניסה. פתח את **גיבוי ושחזור** למטה.")
-    with st.expander("גיבוי ושחזור", expanded=False):
-        now = _now()
-        text = backup.make_backup(holdings, watchlist, now)
-        st.caption("התיק ורשימת המעקב נשמרים רק בדפדפן במכשיר הזה. גיבוי שומר "
-                   "אותם בקובץ או כטקסט, ואפשר לשחזר אותם בכל מכשיר.")
-        st.download_button("💾 שמור קובץ גיבוי", data=text.encode("utf-8"),
-                           file_name=backup.file_name(now), mime="application/json",
-                           on_click=_mark_backup, key="backup_download",
-                           width="stretch")
-        st.caption("או העתק את הטקסט (כפתור ההעתקה בפינה) ושמור אותו, למשל בפתקים:")
-        st.code(text, language="json")
-        st.button("✓ העתקתי ושמרתי", key="backup_copied", on_click=_mark_backup)
-        if last:
-            try:
-                when = datetime.fromisoformat(last).strftime("%d.%m.%Y %H:%M")
-            except ValueError:
-                when = last
-            st.caption(f"גיבוי אחרון: \u2066{when}\u2069")
-        st.markdown("**שחזור**")
-        st.file_uploader("מקובץ גיבוי", type=["json"], key="restore_file")
-        st.text_area("או הדבק כאן את טקסט הגיבוי", key="restore_text", height=100)
-        st.button("שחזר", key="restore_btn", on_click=_restore_backup, type="primary",
-                  width="stretch")
-        st.caption("שחזור מחליף את התיק ורשימת המעקב שבמכשיר הזה בנתונים שבגיבוי.")
 
 
 def render_watchlist_home():
@@ -1038,7 +1282,7 @@ def render_watchlist_home():
                 q = load_quote(sym)
                 if q and q.found:
                     label = (f"**{q.name or sym}** · \u2066{sym}\u2069 · "
-                             f"\u2066{display_price(q.price, q.currency)}\u2069")
+                             f"\u2066{md_safe(display_price(q.price, q.currency))}\u2069")
                     if q.change_pct is not None:
                         color = "green" if q.change_pct >= 0 else "red"
                         label += f" · :{color}[\u2066{q.change_pct:+.2f}%\u2069]"
@@ -1058,8 +1302,9 @@ def render_watchlist_home():
 # Load the watchlist first. A row click stores a pending query that we move
 # into the search box BEFORE the widget is created (Streamlit rule).
 ls = init_watchlist()
-init_portfolio(ls)
+_LS = ls
 init_last_backup(ls)
+migrate_browser_portfolio(ls)
 if "pending_query" in st.session_state:
     st.session_state["search_box"] = st.session_state.pop("pending_query")
 
@@ -1082,7 +1327,7 @@ query = st.text_input(
 if home:
     render_portfolio_home()
     render_watchlist_home()
-    render_backup_home()
+    render_trades_and_backup()
     st.caption("טיפ: מניות בבורסה בתל אביב מסתיימות ב-`.TA`, למשל `TEVA.TA`. "
                "החיפוש לא עובד לפי מספר נייר.")
 
@@ -1163,38 +1408,7 @@ if symbol:
         )
 
         # ======================= My holding (portfolio) =======================
-        holding = portfolio.find(st.session_state.get("portfolio", []), symbol)
-        price_major, major_ccy = portfolio.to_major(quote.price, quote.currency)
-        msg = st.session_state.pop("_pf_msg", None)
-        if msg and msg[1] == symbol:
-            text = {"saved": "נשמר בתיק.", "removed": "הוסר מהתיק.",
-                    "error": "המחיר צריך להיות מספר חיובי."}[msg[0]]
-            (st.error if msg[0] == "error" else st.success)(text)
-        if holding:
-            row = portfolio.position(holding, price_major, major_ccy, quote.change_pct)
-            pnl = (f" · רווח/הפסד \u2066{portfolio.money(row['pnl'], major_ccy)}\u2069 "
-                   f"(\u2066{row['pnl_pct']:+.1f}%\u2069)"
-                   if row["pnl"] is not None and row["pnl_pct"] is not None else "")
-            title = f"בתיק: \u2066{holding['qty']:,.4g}\u2069 מניות{pnl}"
-        else:
-            title = "+ הוספה לתיק"
-        with st.expander(title, expanded=False):
-            with st.form(key=f"pf_form_{symbol}", border=False):
-                c1, c2 = st.columns(2)
-                c1.number_input("כמה מניות?", min_value=0.0, step=1.0, format="%g",
-                                value=float(holding["qty"]) if holding else 0.0,
-                                key=f"pf_qty_{symbol}")
-                c2.number_input(f"מחיר קנייה ממוצע למניה ({portfolio.CURRENCY_SYMBOLS.get(major_ccy, major_ccy)})",
-                                min_value=0.0, step=0.01, format="%.2f",
-                                value=float(holding["cost"]) if holding
-                                else float(round(price_major or 0.0, 2)),
-                                key=f"pf_cost_{symbol}")
-                st.form_submit_button("שמור", on_click=_save_holding, args=(symbol,),
-                                      type="primary", width="stretch")
-            if holding:
-                st.button("הסר מהתיק", key=f"pf_rm_{symbol}", on_click=_remove_holding,
-                          args=(symbol,), width="stretch")
-            st.caption("נשמר בדפדפן במכשיר הזה. כמות 0 מוציאה את המניה מהתיק.")
+        render_trade_box(symbol, quote)
 
         # ======================= Price chart =======================
         range_key = st.segmented_control(
@@ -1288,11 +1502,12 @@ if symbol:
                     up = analyst.upside_pct or 0.0
                     st.markdown(
                         f"**יעד מחיר ממוצע:** <span class='sa-num'>"
-                        f"{_esc(display_price(analyst.target_mean, cur))}</span> "
+                        f"{html_safe(_esc(display_price(analyst.target_mean, cur)))}</span> "
                         f"{chip_html(up, '%')}", unsafe_allow_html=True)
                     if analyst.target_low and analyst.target_high:
-                        st.caption(f"טווח היעדים: \u2066{display_price(analyst.target_low, cur)}"
-                                   f"\u2069 עד \u2066{display_price(analyst.target_high, cur)}\u2069")
+                        st.caption(md_safe(
+                            f"טווח היעדים: \u2066{display_price(analyst.target_low, cur)}"
+                            f"\u2069 עד \u2066{display_price(analyst.target_high, cur)}\u2069"))
                 st.caption("זה מה שוול סטריט מצפה לו, לא התחזית שלנו.")
 
                 # ALWAYS say something about how we compare to the analysts.
@@ -1505,8 +1720,8 @@ if symbol:
 # (Callbacks set "_wl_dirty"; we persist once here so the write happens last.)
 if st.session_state.pop("_wl_dirty", False):
     persist_watchlist(ls)
-if st.session_state.pop("_pf_dirty", False):
-    persist_portfolio(ls)
+if st.session_state.pop("_trades_dirty", False):
+    persist_trades(ls)
 if st.session_state.pop("_bk_dirty", False) and ls is not None:
     try:
         ls.setItem(LAST_BACKUP_KEY, st.session_state.get("last_backup") or "",
