@@ -27,6 +27,7 @@ import data_store  # where our own data lives (local folder now, private repo la
 import portfolio  # the user's trades -> holdings, P&L, tax, totals in ₪ (pure Python)
 import buy_score  # 50% engine + 30% analysts + 20% AI news -> -100..+100
 import news  # latest headlines from free sources (Yahoo, Google News RSS)
+import ai_insights  # numbers behind the AI overview / picks (pure Python)
 
 # Basic page configuration (title shown in the browser tab, etc.).
 st.set_page_config(page_title="המניות שלי", page_icon="📈",
@@ -1269,6 +1270,117 @@ def render_portfolio_home():
             label += score_tag(score_for(sym))
             st.button(label, key=f"pf_view_{sym}", on_click=_goto, args=(sym,),
                       width="stretch")
+    render_portfolio_overview(rows, names)
+
+
+# --- Portfolio overview (mockup item 14) ----------------------------------
+
+AI_OVERVIEW_TTL_H = 24
+
+
+@st.cache_resource
+def _ai_overview_store():
+    """Server-wide: portfolio signature -> {"data": {...}, "at": datetime}."""
+    return {}
+
+
+def _run_ai_overview(sig, facts_payload):
+    data = gemini_helper.portfolio_overview(facts_payload, get_gemini_key())
+    if data:
+        _ai_overview_store()[sig] = {"data": data, "at": datetime.now()}
+    else:
+        st.session_state["_ai_overview_failed"] = True
+
+
+def render_portfolio_overview(rows, names):
+    """Facts computed in code + (on request) AI strengths / weaknesses / ideas."""
+    scores = {r["symbol"]: score_for(r["symbol"])["score"] for r in rows}
+    facts = ai_insights.portfolio_facts(rows, scores, names)
+    if not facts["weights"]:
+        return
+    with st.container(border=True):
+        st.markdown("#### מבט על התיק")
+        avg = facts["avg_score"]
+        top_sym, top_name, top_pct = facts["top"]
+        cells = [
+            (f"{avg:+d}" if avg is not None else "—", "ציון ממוצע"),
+            (f"{top_pct:.0f}%", "במניה הגדולה"),
+            (f"{facts['il_pct']:.0f}%", "בישראל (₪)"),
+        ]
+        st.markdown(
+            '<div style="display:grid;grid-template-columns:repeat(3,1fr);gap:6px;margin-bottom:10px">'
+            + "".join(f'<div class="sa-card" style="margin:0;padding:8px;text-align:center">'
+                      f'<b class="sa-num" style="font-size:1.15rem">{_esc(v)}</b><br>'
+                      f'<span class="sa-sub">{_esc(k)}</span></div>' for v, k in cells)
+            + "</div>"
+            + '<div style="display:flex;gap:3px;height:10px;border-radius:99px;overflow:hidden">'
+            + "".join(f'<span style="flex:{p:.2f};background:var(--sa-accent);opacity:{max(.3, 1 - i * .2):.2f}"></span>'
+                      for i, (_, _, p) in enumerate(facts["weights"]))
+            + '</div><div class="sa-sub" style="display:flex;flex-wrap:wrap;gap:4px 12px;margin-top:4px">'
+            + "".join(f'<span>{_esc(n)} <span class="sa-num">{p:.0f}%</span></span>'
+                      for _, n, p in facts["weights"])
+            + "</div>", unsafe_allow_html=True)
+
+        sig = ai_insights.signature(facts)
+        item = _ai_overview_store().get(sig)
+        fresh = item and (datetime.now() - item["at"]).total_seconds() < AI_OVERVIEW_TTL_H * 3600
+        if fresh:
+            for key, title, icon in (("strengths", "חוזקות", "✓"), ("weaknesses", "חולשות", "!"),
+                                     ("ideas", "רעיונות לבדיקה", "→")):
+                if item["data"].get(key):
+                    st.markdown(f"**{title}**")
+                    for line in item["data"][key]:
+                        st.markdown(f"{icon} {md_safe(line)}")
+            st.caption(f"ניתוח AI מ-\u2066{item['at']:%d.%m %H:%M}\u2069 (מתרענן עד פעם ביום).")
+        no_key = not get_gemini_key()
+        st.button("🤖 רענן ניתוח AI" if fresh else "🤖 נתח את התיק עם AI",
+                  key="ai_overview_btn", on_click=_run_ai_overview,
+                  args=(sig, ai_insights.facts_for_ai(facts)), disabled=no_key or bool(fresh),
+                  help="צריך מפתח Gemini" if no_key else
+                  ("כבר נותח היום" if fresh else "קריאה אחת ל-Gemini"), width="stretch")
+        if st.session_state.pop("_ai_overview_failed", False):
+            st.caption("_ה-AI לא הצליח לנתח כרגע. נסה שוב מאוחר יותר._")
+        st.caption("המספרים (משקלים, ציונים) מחושבים בקוד. ה-AI כותב רק את החוזקות, "
+                   "החולשות והרעיונות. רעיונות לבדיקה, לא ייעוץ השקעות.")
+
+
+# --- "AI recommends" (mockup item 15) ------------------------------------
+
+def load_ai_picks():
+    try:
+        return data_store.read_json("data/ai_picks.json", None, **_store_kwargs())
+    except Exception:
+        return None
+
+
+def render_ai_picks_home():
+    st.caption("מניות שכדאי לבדוק, מתוך כ-611 המניות שנסרקו בלילה. רעיונות לבדיקה, "
+               "לא המלצה לקנות.")
+    picks = load_ai_picks()
+    if not picks or not (picks.get("short") or picks.get("long")):
+        st.info("ההמלצות נוצרות בסריקה היומית (08:00) ונשלחות לטלגרם. באתר הן "
+                "יופיעו כאן אחרי שנחבר את המאגר הפרטי, כי הסריקה רצה על המחשב "
+                "ולא בשרת של האתר.")
+        return
+    by_ai = picks.get("source") == "ai"
+    for key, title, hint in (("short", "לטווח קצר", "שבועות עד חודשים"),
+                             ("long", "לטווח ארוך", "שנה ומעלה")):
+        if not picks.get(key):
+            continue
+        with st.container(border=True):
+            st.markdown(f"#### {title} <span class='sa-sub'>{hint}</span>",
+                        unsafe_allow_html=True)
+            for p in picks[key]:
+                st.button(f"**\u2066{p['symbol']}\u2069**", key=f"pick_{key}_{p['symbol']}",
+                          on_click=_goto, args=(p["symbol"],), width="stretch")
+                st.caption(md_safe(p["why"]))
+    try:
+        when = date.fromisoformat(picks["day"]).strftime("%d.%m.%Y")
+    except (KeyError, ValueError):
+        when = "?"
+    st.caption(f"מהסריקה של \u2066{when}\u2069. "
+               + ("הקוד סינן קודם את המניות החזקות, ורק אחר כך ה-AI בחר מתוכן והסביר."
+                  if by_ai else "נבחר לפי הקוד בלבד (ה-AI לא היה זמין)."))
 
 
 # --- Buy score (mockup items 12-13) -------------------------------------
@@ -1472,9 +1584,15 @@ query = st.text_input(
 ).strip()
 
 if home:
-    render_portfolio_home()
-    render_watchlist_home()
-    render_trades_and_backup()
+    home_tab = st.segmented_control(
+        "תצוגה", options=["התיק והמעקב", "ה-AI ממליץ"], default="התיק והמעקב",
+        key="home_tab", label_visibility="collapsed") or "התיק והמעקב"
+    if home_tab == "ה-AI ממליץ":
+        render_ai_picks_home()
+    else:
+        render_portfolio_home()
+        render_watchlist_home()
+        render_trades_and_backup()
     st.caption("טיפ: מניות בבורסה בתל אביב מסתיימות ב-`.TA`, למשל `TEVA.TA`. "
                "החיפוש לא עובד לפי מספר נייר.")
 

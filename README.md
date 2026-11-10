@@ -98,7 +98,20 @@ page and in the portfolio / watchlist rows: 50% our engine (1-year verdict)
 left out and the others re-weighted. The AI part runs only on the button
 (one Gemini call, cached server-wide for 12 hours) to protect the free
 quota. Headlines come from free sources only (`news.py`: Yahoo, else Google
-News RSS -- headlines and links, no article text). Colors live in `.streamlit/config.toml`, the layout CSS at
+News RSS -- headlines and links, no article text).
+
+**AI on top of the numbers** (`ai_insights.py`; the code computes every
+number, the AI only writes words):
+- *מבט על התיק* (home, under the portfolio): weights, the biggest position,
+  share in Israel and the value-weighted average buy score; "נתח את התיק עם
+  AI" adds strengths / weaknesses / ideas (one Gemini call, cached 24 h).
+- *ה-AI ממליץ* (home tab): every morning the daily job keeps the 10 strongest
+  stocks for the short term (6-month view) and 10 for the long term (5-year
+  view) out of ~611, and Gemini picks 2-3 of each with a reason (only from
+  those lists; without a key the code's top-2 are used). Saved to
+  `data/ai_picks.json` and added to the Telegram message. The live site can
+  show them once the private data repo is connected (the scan runs on the
+  Mac). Colors live in `.streamlit/config.toml`, the layout CSS at
 the top of `app.py`. Some engine texts (signal names, tooltips) are still
 English.
 
@@ -143,6 +156,7 @@ venv\Scripts\python test_daily_job.py   # daily run: guard, history, ranking, Te
 venv\Scripts\python test_portfolio.py    # portfolio math: trades, P/L, tax, backup, reminder (offline)
 venv\Scripts\python test_portfolio_ui.py # portfolio screens on sample data (AppTest, offline)
 venv\Scripts\python test_buy_score.py    # buy score, news parsing, AI reply parsing, score in app (offline)
+venv\Scripts\python test_ai_insights.py  # portfolio facts, AI picks (code fallback), both screens (offline)
 venv\Scripts\python test_rank.py     # screener ranking + resume, no network
 ```
 

@@ -20,6 +20,10 @@ from unittest.mock import patch
 
 sys.path.insert(0, os.path.dirname(__file__))
 
+# Never call the real Gemini from the daily-job tests (it would use the key
+# in secrets.toml): the AI picks fall back to the code-only version.
+os.environ["STOCKAPP_DISABLE_GEMINI"] = "1"
+
 import daily_job
 import notify
 

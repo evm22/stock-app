@@ -217,3 +217,112 @@ def rate_news(symbol, name, headlines, api_key):
     except Exception as error:
         logger.warning("Gemini: rate_news failed (%s)", error)
         return None
+
+
+
+# --- Shared: one JSON answer from Gemini (used by the features below) -------
+
+def load_api_key():
+    """GEMINI_API_KEY from the environment, else .streamlit/secrets.toml
+    (for scripts like daily_job.py that run outside Streamlit). None if unset."""
+    import os
+    import tomllib
+    key = os.environ.get("GEMINI_API_KEY")
+    if key:
+        return key
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".streamlit", "secrets.toml")
+    try:
+        with open(path, "rb") as fh:
+            return tomllib.load(fh).get("GEMINI_API_KEY") or None
+    except (OSError, ValueError):
+        return None
+
+
+def parse_json_object(text):
+    """The first {...} object in a reply (tolerates ```json fences), or None."""
+    import json as _json
+    import re as _re
+    if not text:
+        return None
+    m = _re.search(r"\{.*\}", text, _re.S)
+    if not m:
+        return None
+    try:
+        obj = _json.loads(m.group(0))
+    except ValueError:
+        return None
+    return obj if isinstance(obj, dict) else None
+
+
+def _ask_json(prompt, api_key, max_tokens=4096):
+    """Ask once (trying the available Flash models) -> dict or None. Never raises."""
+    if not api_key:
+        return None
+    try:
+        import google.generativeai as genai
+        genai.configure(api_key=api_key)
+        candidates = []
+        selected = _select_flash_model(genai)
+        if selected:
+            candidates.append(selected)
+        candidates += [n for n in _FALLBACK_MODELS if n not in candidates]
+        for model_name in candidates:
+            try:
+                model = genai.GenerativeModel(
+                    model_name, generation_config={"temperature": 0.2,
+                                                   "max_output_tokens": max_tokens})
+                response = model.generate_content(
+                    prompt, request_options={"timeout": _REQUEST_TIMEOUT_S})
+                obj = parse_json_object(getattr(response, "text", "") or "")
+                if obj:
+                    return obj
+            except Exception as error:
+                logger.warning("Gemini: %s failed (%s)", model_name, error)
+        return None
+    except Exception as error:
+        logger.warning("Gemini: _ask_json failed (%s)", error)
+        return None
+
+
+# --- Item 14: portfolio overview (words only; numbers come from the code) ---
+
+def portfolio_overview(facts, api_key):
+    """{"strengths": [..], "weaknesses": [..], "ideas": [..]} in Hebrew, or None."""
+    import json as _json
+    prompt = (
+        "You review a private investor's stock portfolio. ALL numbers below were "
+        "computed by code; do not invent other numbers.\n"
+        + _json.dumps(facts, ensure_ascii=False) + "\n\n"
+        "Write in simple Hebrew, short sentences, for a beginner. Return JSON only:\n"
+        '{"strengths": [2 items], "weaknesses": [2-3 items], '
+        '"ideas": [2-3 ideas to CONSIDER, e.g. diversification or a max weight per '
+        'stock; never tell them to buy or sell a specific stock]}'
+    )
+    obj = _ask_json(prompt, api_key)
+    if not obj:
+        return None
+    out = {k: [str(x).strip() for x in (obj.get(k) or []) if str(x).strip()][:3]
+           for k in ("strengths", "weaknesses", "ideas")}
+    return out if any(out.values()) else None
+
+
+# --- Item 15: "AI recommends" from the nightly scan -------------------------
+
+def pick_recommendations(candidates, api_key):
+    """Raw {"short": [{symbol, why}], "long": [...]} chosen ONLY from the given
+    candidates, or None. Validate with ai_insights.clean_picks()."""
+    import json as _json
+    prompt = (
+        "From tonight's scan of ~611 stocks, code already kept the strongest "
+        "candidates. Scores are 0..100 (50 = neutral); analyst_upside_pct is the "
+        "Wall Street mean target vs today's price.\n"
+        "SHORT term (weeks to months) candidates:\n"
+        + _json.dumps(candidates.get("short", []), ensure_ascii=False) + "\n"
+        "LONG term (a year and more) candidates:\n"
+        + _json.dumps(candidates.get("long", []), ensure_ascii=False) + "\n\n"
+        "Choose 2 or 3 per list, ONLY symbols from that list, preferring a mix of "
+        "themes and reasonable risk. For each, one short Hebrew sentence why it is "
+        "interesting to look at (ideas to check, not advice). Return JSON only:\n"
+        '{"short": [{"symbol": "...", "why": "..."}], "long": [{"symbol": "...", "why": "..."}]}'
+    )
+    return _ask_json(prompt, api_key)

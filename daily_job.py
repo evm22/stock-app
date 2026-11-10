@@ -41,6 +41,7 @@ import traceback
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 
+import ai_insights
 import data_store
 import notify
 import rank
@@ -54,6 +55,7 @@ LAST_RUN_PATH = "data/last_run.json"
 SUMMARY_PATH = "data/last_summary.txt"
 RANKED_LATEST_PATH = "data/ranked/latest.json"
 RANKED_DAY_PATH = "data/ranked/{day}.json"
+AI_PICKS_PATH = "data/ai_picks.json"   # "ה-AI ממליץ" (read by the app)
 
 HORIZON = "1y"           # horizon used for the daily ranking
 TOP_N = 10               # stocks listed in the message
@@ -212,6 +214,46 @@ def seconds_until(hhmm, now=None):
 
 
 # ---------------------------------------------------------------------------
+# "AI recommends" (mockup item 15)
+# ---------------------------------------------------------------------------
+
+def make_ai_picks(rows, today, api_key=None):
+    """Code filters the scan to 10 short- + 10 long-term candidates; Gemini
+    picks 2-3 of each and says why. Without a key (or if the AI fails) the
+    code's own top-2 are used and marked so. Never raises."""
+    try:
+        candidates = ai_insights.pick_candidates(rows)
+    except Exception:
+        candidates = {"short": [], "long": []}
+    picks, source = None, "code"
+    if api_key and (candidates["short"] or candidates["long"]):
+        import gemini_helper  # imported here: only the daily run needs it
+        raw = gemini_helper.pick_recommendations(candidates, api_key)
+        picks = ai_insights.clean_picks(raw, candidates) if raw else None
+        if picks and (picks["short"] or picks["long"]):
+            source = "ai"
+        else:
+            picks = None
+    if picks is None:
+        picks = ai_insights.fallback_picks(candidates)
+    return {"day": today, "source": source, "short": picks["short"],
+            "long": picks["long"], "candidates": candidates}
+
+
+def picks_lines(picks):
+    """The Telegram section for the picks."""
+    if not picks or not (picks.get("short") or picks.get("long")):
+        return []
+    title = "🤖 ה-AI ממליץ לבדוק" if picks.get("source") == "ai" else "🔎 שווה לבדוק (לפי הקוד)"
+    out = ["", title + ":"]
+    for key, name in (("short", "טווח קצר"), ("long", "טווח ארוך")):
+        if picks.get(key):
+            out.append(f"{name}:")
+            out += [f"• {p['symbol']} – {p['why']}" for p in picks[key]]
+    return out
+
+
+# ---------------------------------------------------------------------------
 # Telegram (optional)
 # ---------------------------------------------------------------------------
 
@@ -307,8 +349,20 @@ def run(data_dir, limit=None, force=False, now_utc=None, scan_fn=None, universe=
     data_store.write_json(RANKED_LATEST_PATH, snapshot, local_dir=data_dir)
     last_run["ranked"] = len(ranked)
 
+    ai_key = None
+    if not os.environ.get("STOCKAPP_DISABLE_GEMINI"):
+        import gemini_helper
+        ai_key = gemini_helper.load_api_key()
+    picks = make_ai_picks(rows, today, ai_key)
+    data_store.write_json(AI_PICKS_PATH, picks, local_dir=data_dir)
+    last_run["ai_picks"] = picks["source"]
+
     message = build_message(rows, ranked, diff_top(ranked, previous), today,
                             complete=result.get("complete", True))
+    extra = picks_lines(picks)
+    if extra:  # before the two footer lines (formula + disclaimer)
+        lines = message.split("\n")
+        message = "\n".join(lines[:-3] + extra + lines[-3:])
     if dry_run:
         print("\n" + message)
         return last_run
